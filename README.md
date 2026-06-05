@@ -1,6 +1,8 @@
 Teletext for Raspberry Pi
 -------------------------
 
+**This is a NABTS fork, please see the additional [NABTS README](README-NABTS.md).
+
 This software generates a teletext signal in software. No hardware
 mods are needed.
 

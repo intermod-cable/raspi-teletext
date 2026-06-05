@@ -1,168 +1,288 @@
 /*
-   demo.c - teletext demo
-   Copyright 2015 Alistair Buxton <a.j.buxton@gmail.com>
-
-   This file is part of raspi-teletext.
-
-   raspi-teletext is free software: you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published by
-   the Free Software Foundation, either version 3 of the License, or
-   (at your option) any later version.
-
-   raspi-teletext is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-   GNU General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with raspi-teletext. If not, see <http://www.gnu.org/licenses/>.
-*/
+ * demo.c  –  NABTS demo transmitter
+ * Based on raspi-teletext by Alistair Buxton <a.j.buxton@gmail.com>
+ *
+ * Implements two demo modes:
+ *
+ *   demo_graphics()  –  NAPLPS presentation page with colour bars, title,
+ *                       bouncing box and frame counter (default).
+ *   demo_ascii()     –  plain ASCII identification packets; useful for
+ *                       verifying decoder lock before attempting NAPLPS.
+ *
+ * ── CEA-516 packet usage ─────────────────────────────────────────────────
+ *
+ *  channel 0x000  –  null / filler packets (Standard, full, CI incrementing)
+ *  channel 0x001  –  NAPLPS presentation data (graphics demo)
+ *  channel 0x00F  –  ASCII identification packets (ascii demo)
+ *
+ *  Data Group structure (CEA-516 §4):
+ *    First packet of a Data Group:  sync=1 (Synchronizing Packet, b2=1 in PS)
+ *    Subsequent packets:            sync=0 (Standard Packet)
+ *    Last packet if Data Block not completely full: full=0 (b4=1 in PS)
+ *
+ *  Continuity Index (CI, §3.2.4):
+ *    Increments by 1 (mod 16) for each packet on a given channel.
+ *    Managed per-channel with nabts_ci_t / nabts_ci_next().
+ *
+ * ── NAPLPS encoding ──────────────────────────────────────────────────────
+ *
+ *  Presentation data (CEA-516 §6.1) conforms to ANSI/CSA T1.502 (NAPLPS).
+ *  Only the 7-bit code environment is supported (§6.1 note).
+ *  All bytes emitted here are 7-bit clean (bit 7 = 0).
+ *
+ *  Coordinate encoding (NAPLPS domain/fraction):
+ *    Each ordinate: 3 bytes.  Byte 1 (domain): bits[5:0] = floor(coord×64).
+ *    Bytes 2-3 (fraction): 0x00 0x00 (integer resolution for this demo).
+ *    Range 0..63 maps to normalised screen 0.0..1.0.
+ *
+ *  Colour byte (used with ESC 0x24 set-FG and ESC 0x26 set-BG):
+ *    bits[7:4] = colour index: 0=black 1=red 2=green 3=yellow
+ *                              4=blue  5=magenta 6=cyan 7=white
+ *    bits[3:0] = 0x00
+ *
+ * ── Byte budget per graphics frame ──────────────────────────────────────
+ *
+ *  clear(1) + set_bg(3) + 5 bars(85) + title(21) + box(17) + counter(19) = 146
+ *  146 bytes / 28 bytes per packet = 6 packets (last has 6 data + 22 padding)
+ *  NL_PAGE_MAX = 168 bytes (6 × 28)
+ */
 
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
-#include <time.h>
 
 #include "buffer.h"
-#include "hamming.h"
+#include "nabts.h"
 
-#include "demo_buffer.h"
+/* ── NAPLPS byte constants ─────────────────────────────────────────────── */
 
-long double a[4] = {0, 0, 0, 0};
-float cpu_f[4];
+#define NL_FF      0x0Cu   /* Form Feed: clear screen              */
+#define NL_ESC     0x1Bu   /* Escape prefix                        */
+#define NL_SET_FG  0x24u   /* ESC 0x24 <col>  set foreground       */
+#define NL_SET_BG  0x26u   /* ESC 0x26 <col>  set background       */
+#define NL_RECT    0x63u   /* ESC 0x63 x1 y1 x2 y2  filled rect   */
+#define NL_MOVE    0x61u   /* ESC 0x61 x y  move (no draw)         */
 
-void get_cpu(void)
+#define COL_BLACK   0x00u
+#define COL_RED     0x10u
+#define COL_GREEN   0x20u
+#define COL_YELLOW  0x30u
+#define COL_BLUE    0x40u
+#define COL_MAGENTA 0x50u
+#define COL_CYAN    0x60u
+#define COL_WHITE   0x70u
+
+/* ── Page assembly ─────────────────────────────────────────────────────── */
+
+#define NL_PAGE_MAX  168   /* 6 packets × 28 bytes */
+
+static uint8_t nl_page[NL_PAGE_MAX];
+static int     nl_len;
+
+static void nl_byte(uint8_t b)
 {
-    FILE *fp;
-    long double b[4], c[4], total;
-    int n;
+    if (nl_len < NL_PAGE_MAX) nl_page[nl_len++] = b;
+}
+static void nl_colour(uint8_t cmd, uint8_t col)
+    { nl_byte(NL_ESC); nl_byte(cmd); nl_byte(col); }
+static void nl_rect(uint8_t x1, uint8_t y1, uint8_t x2, uint8_t y2) {
+    nl_byte(NL_ESC); nl_byte(NL_RECT);
+    nl_byte(x1); nl_byte(0); nl_byte(0);
+    nl_byte(y1); nl_byte(0); nl_byte(0);
+    nl_byte(x2); nl_byte(0); nl_byte(0);
+    nl_byte(y2); nl_byte(0); nl_byte(0);
+}
+static void nl_move(uint8_t x, uint8_t y) {
+    nl_byte(NL_ESC); nl_byte(NL_MOVE);
+    nl_byte(x); nl_byte(0); nl_byte(0);
+    nl_byte(y); nl_byte(0); nl_byte(0);
+}
+static void nl_text(const char *s) { while (*s) nl_byte((uint8_t)*s++); }
 
-    fp = fopen("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", "r");
-    fscanf(fp,"%d",&n);
-    fclose(fp);
+/* ── Per-channel CI trackers ───────────────────────────────────────────── */
 
-    str_parity(&buffer[0][ 8][25], 14, "Freq.:\x03%dMHz", n/1000);
+static nabts_ci_t ci_null  = {0};   /* channel 0x000 */
+static nabts_ci_t ci_data  = {0};   /* channel 0x001 */
+static nabts_ci_t ci_ident = {0};   /* channel 0x00F */
 
-    fp = fopen("/proc/stat", "r");
-    fscanf(fp,"%*s %Lf %Lf %Lf %Lf",&b[0],&b[1],&b[2],&b[3]);
-    fclose(fp);
+/* ── Packet helpers ────────────────────────────────────────────────────── */
 
-    for (n=0; n<4; n++) {
-        c[n] = b[n] - a[n];
+/*
+ * push_null  –  Standard filler packet on channel 0.
+ * Keeps decoder PLL locked between data bursts.
+ */
+static void push_null(void)
+{
+    uint8_t line[NABTS_LINE_BYTES];
+    uint8_t data[NABTS_DATA_BLOCK_BYTES];
+    memset(data, 0x00, sizeof(data));
+    nabts_build_packet(line, 0x000, nabts_ci_next(&ci_null), 0, 1, data);
+    push_packet(line);
+}
+
+/*
+ * push_page  –  slice nl_page[0..nl_len) into 28-byte NABTS packets on
+ *               channel 0x001, correctly setting sync and full flags.
+ *
+ *  First packet in the sequence:   sync=1  (Synchronizing Packet, §4.1)
+ *  Middle packets:                 sync=0, full=1
+ *  Last packet if remainder < 28:  sync=0, full=0  (Data Block not full)
+ *  Last packet if remainder == 28: sync=0, full=1
+ *
+ *  One null packet is interleaved after each data packet so channel 0
+ *  nulls continue flowing during the burst.
+ */
+static void push_page(void)
+{
+    int offset  = 0;
+    int first   = 1;
+
+    while (offset < nl_len) {
+        uint8_t data[NABTS_DATA_BLOCK_BYTES];
+        memset(data, 0x00, sizeof(data));
+
+        int remaining = nl_len - offset;
+        int chunk     = (remaining >= NABTS_DATA_BLOCK_BYTES)
+                        ? NABTS_DATA_BLOCK_BYTES : remaining;
+        memcpy(data, nl_page + offset, (size_t)chunk);
+
+        int is_full = (chunk == NABTS_DATA_BLOCK_BYTES);
+
+        uint8_t line[NABTS_LINE_BYTES];
+        nabts_build_packet(line,
+                           0x001,
+                           nabts_ci_next(&ci_data),
+                           first,      /* sync flag */
+                           is_full,    /* full flag */
+                           data);
+        push_packet(line);
+        push_null();
+
+        offset += chunk;
+        first   = 0;
     }
-
-    total = c[0] + c[1] + c[2] + c[3];
-    memcpy (a, b, sizeof a);
-
-    str_parity(&buffer[0][10][26], 12, "User:\x03%5.1f%%", c[0]*100.0/total);
-    str_parity(&buffer[0][11][26], 12, "Nice:\x03%5.1f%%", c[1]*100.0/total);
-    str_parity(&buffer[0][12][26], 12, "Sys.:\x03%5.1f%%", c[2]*100.0/total);
-    str_parity(&buffer[0][13][26], 12, "Idle:\x03%5.1f%%", c[3]*100.0/total);
-
 }
 
-void get_mem(void)
+/* ── Scene elements ────────────────────────────────────────────────────── */
+
+/* Five colour bars across the top 22% of the screen (y 0..14) */
+static void build_colour_bars(void)
 {
-    FILE *fp;
-    int mem[2];
-
-    fp = fopen("/proc/meminfo", "r");
-    fscanf(fp,"%*s %d kB\n",&mem[0]);
-    fscanf(fp,"%*s %d kB\n",&mem[1]);
-    fclose(fp);
-
-    str_parity(&buffer[0][15][26], 12, "Mem.:\x03%4dMB", mem[0]/1024);
-    str_parity(&buffer[0][16][26], 12, "Free:\x03%4dMB", mem[1]/1024);
-}
-
-void get_net(void)
-{
-    FILE *fp;
-    char tmp[100];
-    char *pch;
-    char *tokens[4] = {0,0,0,0};
-    int n;
-
-    gethostname(tmp, 14);
-    tmp[14] = 0;
-    str_parity(&buffer[0][3][2], 15, "\x0d%14s", tmp);
-
-    fp = popen("/sbin/ip -o -f inet addr show scope global", "r");
-    fgets(tmp, 99, fp);
-    pclose(fp);
-
-    tokens[0] = pch = strtok (tmp," \n/");
-    for (n=1; n<4; n++)
-    {
-        tokens[n] = pch = strtok (NULL, " \n/");
-    }
-
-    if(tokens[1] && tokens[3]) {
-        str_parity(&buffer[0][3][18], 22, "%5s:\x03%s", tokens[1], tokens[3]);
+    static const uint8_t cols[5] = {
+        COL_WHITE, COL_YELLOW, COL_CYAN, COL_GREEN, COL_MAGENTA
+    };
+    for (int i = 0; i < 5; i++) {
+        nl_colour(NL_SET_FG, cols[i]);
+        nl_rect((uint8_t)(i * 12), 0, (uint8_t)(i * 12 + 11), 14);
     }
 }
 
-void get_temp(void)
+/* "NABTS DEMO" centred in the middle band */
+static void build_title(void)
 {
-    FILE *fp;
-    char tmp[100];
-    char *pch;
-
-    fp = popen("/usr/bin/vcgencmd measure_temp", "r");
-    fgets(tmp, 99, fp);
-    pclose(fp);
-    pch = strtok (tmp,"=\n");
-    pch = strtok (NULL,"=\n");
-
-    if(pch) {
-        str_parity(&buffer[0][18][25], 14, "Temp.:\x03%6s", pch);
-    }
+    nl_colour(NL_SET_FG, COL_WHITE);
+    nl_move(0x0B, 0x1C);
+    nl_text("NABTS DEMO");
 }
 
-void get_time(void)
+/* Bouncing box tracing a rectangular path in the lower half */
+#define BOX_TRAVEL  25
+#define BOX_SIZE     5
+
+static void build_bouncing_box(int frame)
 {
-    time_t rawtime;
-    struct tm *info;
-    char tmp[21];
+    static const uint8_t cols[4] = {
+        COL_RED, COL_GREEN, COL_BLUE, COL_YELLOW
+    };
+    int period = 4 * BOX_TRAVEL;
+    int pos    = frame % period;
+    uint8_t bx, by;
 
-    time( &rawtime );
+    if      (pos < BOX_TRAVEL)     { bx = (uint8_t)(3 + pos);               by = 33; }
+    else if (pos < 2*BOX_TRAVEL)   { bx = (uint8_t)(3 + BOX_TRAVEL - 1);    by = (uint8_t)(33 + pos - BOX_TRAVEL); }
+    else if (pos < 3*BOX_TRAVEL)   { bx = (uint8_t)(3 + BOX_TRAVEL - 1 - (pos - 2*BOX_TRAVEL)); by = (uint8_t)(33 + BOX_TRAVEL - 1); }
+    else                            { bx = 3;                                by = (uint8_t)(33 + BOX_TRAVEL - 1 - (pos - 3*BOX_TRAVEL)); }
 
-    info = localtime( &rawtime );
-
-    strftime(tmp, 21, "\x02%a %d %b\x03%H:%M/%S", info);
-    str_parity(&buffer[0][0][22], 20, tmp);
-    str_parity(&buffer[1][0][22], 20, tmp);
+    nl_colour(NL_SET_FG, cols[(frame / BOX_TRAVEL) % 4]);
+    nl_rect(bx, by, (uint8_t)(bx + BOX_SIZE), (uint8_t)(by + BOX_SIZE));
 }
 
-void demo(void)
+/* "FRM:nnnn" counter at bottom-left */
+static void build_frame_counter(int frame)
 {
-    int n, z=0;
+    nl_colour(NL_SET_FG, COL_CYAN);
+    nl_move(0x02, 0x3A);
+    int f = frame % 10000;
+    char buf[9];
+    buf[0]='F'; buf[1]='R'; buf[2]='M'; buf[3]=':';
+    buf[4]=(char)('0'+f/1000); buf[5]=(char)('0'+(f/100)%10);
+    buf[6]=(char)('0'+(f/10)%10); buf[7]=(char)('0'+f%10); buf[8]='\0';
+    nl_text(buf);
+}
 
-    uint8_t page = 0;
+/* ── demo_graphics ─────────────────────────────────────────────────────── */
 
-    get_cpu();
-    sleep(1);
+#define NULLS_BETWEEN_PAGES  288   /* ~1 second at 300 packets/sec */
 
-    while(1) {
-        get_time();
-        if((z&0xf)==0) {
-            get_cpu();
-            get_mem();
-            if((z&0xff) == 0) {
-                get_net();
-                get_temp();
-            }
+void demo_graphics(void)
+{
+    int frame = 0;
+    while (1) {
+        nl_len = 0;
+        nl_byte(NL_FF);
+        nl_colour(NL_SET_BG, COL_BLACK);
+        build_colour_bars();
+        build_title();
+        build_bouncing_box(frame);
+        build_frame_counter(frame);
+        push_page();
+        for (int i = 0; i < NULLS_BETWEEN_PAGES; i++) {
+            push_null();
+            usleep(3333);
         }
-
-        // flip between page 100 and page 101
-        page = page ^ 1;
-
-        for( n=0; n<24; n++) {
-            push_packet(buffer[page][n]);
-        }
-
-        usleep(100000);
-        z++;
+        frame++;
     }
 }
+
+/* ── demo_ascii ────────────────────────────────────────────────────────── */
+
+/*
+ * Emits a Synchronizing Packet on channel 0x00F carrying a plain ASCII
+ * string every ~1 second, with null packets between bursts.
+ *
+ * This is the minimal signal for verifying decoder lock before NAPLPS.
+ * The payload is placed raw in the Data Block; it is not NAPLPS-encoded.
+ *
+ * Usage: sudo ./teletext -d ascii
+ */
+#define ASCII_NULLS  299
+
+void demo_ascii(void)
+{
+    while (1) {
+        /* Build a single-packet Data Group on channel 0x00F */
+        uint8_t data[NABTS_DATA_BLOCK_BYTES];
+        memset(data, 0x00, sizeof(data));
+        const char *str = "NABTS raspi-teletext";
+        int len = (int)strlen(str);
+        if (len > NABTS_DATA_BLOCK_BYTES) len = NABTS_DATA_BLOCK_BYTES;
+        memcpy(data, str, (size_t)len);
+
+        uint8_t line[NABTS_LINE_BYTES];
+        /* sync=1 (start of Data Group), full=0 (string < 28 bytes) */
+        nabts_build_packet(line, 0x00F,
+                           nabts_ci_next(&ci_ident),
+                           1,   /* sync */
+                           0,   /* not full */
+                           data);
+        push_packet(line);
+
+        for (int i = 0; i < ASCII_NULLS; i++) {
+            push_null();
+            usleep(3333);
+        }
+    }
+}
+
+void demo(void) { demo_graphics(); }
