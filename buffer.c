@@ -1,20 +1,20 @@
 /*
- * buffer.c  –  NABTS packet FIFO
+ * buffer.c  –  NABTS packet FIFO with pixel-clock-corrected bit expansion
  * Based on raspi-teletext buffer.c by Alistair Buxton <a.j.buxton@gmail.com>
  *
- * Each buffer slot holds one complete NABTS Data Line: NABTS_LINE_BYTES (36)
- * bytes = 3-byte preamble + 33-byte Data Packet (CEA-516 §2, §3).
- *
  * copy_packet():
- *   The fixed preamble (CS1, CS2, BS) is written once by teletext.c init()
- *   into the FIXED region of the framebuffer and is never rewritten here.
- *   copy_packet() expands only the 33-byte Data Packet (bytes [3..35])
- *   LSB-first into 264 pixel slots, matching the 264-bit Data Packet.
+ *   Expands the 33-byte Data Packet (264 bits, bytes [3..35] of a 36-byte
+ *   line) into source pixels using the Bresenham width table nabts_px_width[].
  *
- * Filler packet:
- *   When the queue is empty we emit a null Standard Packet on channel 0,
- *   CI=0, with a zero-filled Data Block.  This keeps the decoder's PLL
- *   locked between real data bursts.  No suffix is used (PS=0x15).
+ *   Bit 0 of the Data Packet corresponds to global bit index 24 (after the
+ *   24-bit preamble), so nabts_px_width[24..287] applies.
+ *
+ *   Each bit is written into 1 or 2 consecutive pixel columns, giving an
+ *   effective on-wire bit rate of 5,724,928 Hz (−0.04% from the 5,727,272 Hz
+ *   CEA-516 requirement — within the ±16 Hz tolerance of §1.3).
+ *
+ *   The pixel buffer passed in (dest) starts at column FIXED (29) of the
+ *   framebuffer row and has room for NABTS_DATA_PIXELS (320) columns.
  */
 
 #include <stdio.h>
@@ -38,41 +38,42 @@ static void init_fill_buffer(void)
     if (done) return;
     uint8_t zero_data[NABTS_DATA_BLOCK_BYTES];
     memset(zero_data, 0x00, sizeof(zero_data));
-    /*
-     * Standard packet, channel 0, CI=0, full=1, sync=0.
-     * All data bytes 0x00.  No suffix.
-     */
-    nabts_build_packet(fill_buffer,
-                       0x000,   /* channel 0 */
-                       0,       /* CI = 0    */
-                       0,       /* standard, not sync */
-                       1,       /* full */
-                       zero_data);
+    nabts_build_packet(fill_buffer, 0x000, 0, 0, 1, zero_data);
     done = 1;
 }
 
 /*
- * copy_packet  –  expand the 33-byte Data Packet portion of a 36-byte
- *                 line buffer into pixel-per-bit format.
+ * copy_packet  –  expand the 33-byte Data Packet from a 36-byte line buffer
+ *                 into pixel-per-bit (variable width) format.
  *
- * src  points to the full 36-byte line (preamble + packet).
- * dest points to the pixel row immediately after the FIXED preamble.
+ * src   full 36-byte NABTS Data Line (preamble + packet)
+ * dest  pixel row at column FIXED; must have NABTS_DATA_PIXELS (320) columns
  *
- * We skip src[0..2] (preamble, already in the fixed region) and expand
- * src[3..35] (33 bytes = 264 bits) LSB-first.
+ * The preamble bytes src[0..2] are already rendered into the FIXED region by
+ * init() and are not touched here.
+ *
+ * We expand src[3..35] (33 bytes = 264 bits) using nabts_px_width[24..287]
+ * (global bit positions 24–287 of the 288-bit Data Line).
  */
 static void copy_packet(const uint8_t *src, uint8_t *dest)
 {
-    /* Data Packet starts at byte 3, immediately after the 3-byte preamble */
-    const uint8_t *pkt = src + NABTS_PREAMBLE_BYTES;
+    const uint8_t *pkt = src + NABTS_PREAMBLE_BYTES;  /* byte 3 */
+    int col = 0;
 
-    for (int n = 0; n < NABTS_PACKET_BYTES; n++) {
-        uint8_t b = pkt[n];
-        for (int m = 0; m < 8; m++) {
-            *dest++ = b & 1u;
-            b >>= 1;
+    for (int byte_idx = 0; byte_idx < NABTS_PACKET_BYTES; byte_idx++) {
+        uint8_t b = pkt[byte_idx];
+        for (int bit = 0; bit < 8; bit++) {
+            /* Global bit index = 24 (preamble bits) + byte_idx*8 + bit */
+            int global_bit = NABTS_PREAMBLE_BYTES * 8 + byte_idx * 8 + bit;
+            int width      = nabts_px_width[global_bit];
+            uint8_t val    = (b >> bit) & 1u;
+            dest[col]      = val;
+            if (width == 2)
+                dest[col + 1] = val;
+            col += width;
         }
     }
+    /* col == NABTS_DATA_PIXELS (320) at this point */
 }
 
 void get_packet(uint8_t *dest)

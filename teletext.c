@@ -1,40 +1,37 @@
 /*
- * teletext.c  –  NABTS VBI output for Raspberry Pi (NTSC)
+ * teletext.c  –  NABTS VBI output for Raspberry Pi 1B (NTSC)
  * Based on raspi-teletext by Alistair Buxton <a.j.buxton@gmail.com>
  *
- * Implements CEA-516 (North American Basic Teletext Specification).
+ * Standard: CEA-516 (North American Basic Teletext Specification)
  *
- * ── NTSC VBI geometry ───────────────────────────────────────────────────
+ * ── Pixel clock correction ───────────────────────────────────────────────
  *
- *  525-line, 59.94 Hz.  VBI data lines: 10–21 both fields (§1.1.1).
- *  Pi NTSC_ON register shifts the framebuffer so the top rows land in
- *  the blanking interval.  height=32 gives 16 rows per field (interleaved).
+ *  raspi-teletext stretches the framebuffer (WIDTH pixels) to 720 pixels
+ *  via dispmanx before the Pi VEC outputs it.  At WIDTH=370:
  *
- * ── Preamble (FIXED region) ─────────────────────────────────────────────
+ *    effective source pixel rate = 13.5 MHz × 370/720 = 6.9375 MHz
  *
- *  FIXED = 24 pixels = 3 bytes × 8 bits:
- *    bytes 0-1: 0x55 0x55  (Clock Synchronization Sequence, CEA-516 §2.2.2)
- *    byte  2:   0xE7       (Byte Synchronization / Framing Code, §2.2.3)
+ *  NABTS requires 5,727,272 bps (CEA-516 §1.3).
+ *  1 pixel per bit → 6.9375 MHz  (21% too fast, decoder will not lock).
  *
- *  The 24-bit preamble word emitted LSB-first = 0xE75555:
- *    bits  0- 7: 0x55 (CS byte 1)
- *    bits  8-15: 0x55 (CS byte 2)
- *    bits 16-23: 0xE7 (framing code)
+ *  Fix: spread 288 bits across 349 source pixels using Bresenham expansion
+ *  (nabts_px_width[] table in nabts.h).  This gives 5,724,928 Hz (−0.04%,
+ *  within the ±16 Hz spec tolerance).
  *
- *  This is written once in init() and never overwritten by copy_packet().
+ *  FIXED = 29 pixels  (first 24 bits of the 349-pixel sequence)
+ *  Data  = 320 pixels (remaining 264 bits)
+ *  Total = 349 pixels per line; fits in WIDTH=370 with OFFSET=8.
  *
- * ── Data Packet (variable region) ───────────────────────────────────────
+ * ── NTSC VBI geometry ────────────────────────────────────────────────────
  *
- *  copy_packet() renders the 33-byte Data Packet (P1 P2 P3 CI PS + 28-byte
- *  Data Block) into 264 pixels immediately after the FIXED region.
- *  Total per line: 24 + 264 = 288 pixels = 288 bits. ✓
+ *  height=32: 16 rows per field (interleaved), maps to VBI lines 10-17
+ *  in field 1 and 272-279 in field 2.
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/time.h>
 
 #include "bcm_host.h"
 #include "render.h"
@@ -45,8 +42,11 @@
 #define WIDTH   370
 #define OFFSET  8
 
-/* FIXED = 24 pixels: the 3-byte synchronisation sequence */
-#define FIXED   NABTS_FIXED   /* 24 */
+/*
+ * FIXED = 29: the number of source pixels occupied by the 24-bit preamble
+ * when using the Bresenham pixel-clock-corrected expansion.
+ */
+#define FIXED   NABTS_FIXED   /* 29 */
 
 #define ROW(i, n) ((i) + (PITCH(WIDTH) * (n)) + OFFSET)
 
@@ -54,11 +54,23 @@ int      height = 32;
 uint16_t line_mask[2];
 
 
+/*
+ * render_bit  –  write one bit value into 'width' consecutive pixel columns
+ *                starting at dest[col].
+ */
+static inline void render_bit(uint8_t *row, int col, int width, uint8_t val)
+{
+    for (int p = 0; p < width; p++)
+        row[col + p] = val;
+}
+
+
 void draw(uint8_t *image, int next_resource)
 {
     int m = line_mask[next_resource];
     for (int n = 0; n < height; n += 2) {
-        if (!(m & 1)) get_packet(ROW(image, n + next_resource) + FIXED);
+        if (!(m & 1))
+            get_packet(ROW(image, n + next_resource) + FIXED);
         m >>= 1;
     }
 }
@@ -67,28 +79,42 @@ void draw(uint8_t *image, int next_resource)
 void init(uint8_t *image)
 {
     /*
-     * Write the 3-byte NABTS synchronisation sequence into every VBI row.
+     * Write the 24-bit NABTS preamble into every VBI row using the
+     * Bresenham pixel-width table (nabts_px_width[]).
      *
-     * Preamble (24 bits, LSB-first emission):
-     *   bits  0- 7: 0x55  (CS byte 1)
-     *   bits  8-15: 0x55  (CS byte 2)
-     *   bits 16-23: 0xE7  (framing code)
+     * Preamble bits (LSB-first): 0x55, 0x55, 0xE7
+     *   bits 0-7:   0x55 = 1,0,1,0,1,0,1,0
+     *   bits 8-15:  0x55 = 1,0,1,0,1,0,1,0
+     *   bits 16-23: 0xE7 = 1,1,1,0,0,1,1,1
      *
-     * We pack this as a 32-bit word and shift out the low 24 bits LSB-first.
-     * The top 8 bits are unused.
+     * The 24 preamble bits occupy nabts_px_width[0..23], total = 29 pixels.
+     * This is exactly the FIXED region (columns 0..28 of the data area).
      */
-    uint32_t preamble = 0x00E75555UL;   /* bits 0-23 = 0x55 0x55 0xE7 LSB-first */
-    int n, m, even, odd;
+    static const uint8_t preamble_bytes[3] = { 0x55u, 0x55u, 0xE7u };
+    int even, odd, n;
 
-    for (m = 0; m < FIXED; m++) {
-        even = line_mask[0];
-        odd  = line_mask[1];
-        for (n = 0; n < height; n += 2) {
-            if (!(even & 1)) ROW(image, n    )[m] = (preamble >> m) & 1u;
-            if (!(odd  & 1)) ROW(image, n + 1)[m] = (preamble >> m) & 1u;
-            even >>= 1;
-            odd  >>= 1;
+    even = line_mask[0];
+    odd  = line_mask[1];
+
+    for (n = 0; n < height; n += 2) {
+        uint8_t *row_even = ROW(image, n);
+        uint8_t *row_odd  = ROW(image, n + 1);
+
+        int col = 0;
+        for (int byte_idx = 0; byte_idx < 3; byte_idx++) {
+            uint8_t b = preamble_bytes[byte_idx];
+            for (int bit = 0; bit < 8; bit++) {
+                int global_bit = byte_idx * 8 + bit;
+                int width      = nabts_px_width[global_bit];
+                uint8_t val    = (b >> bit) & 1u;
+                if (!(even & 1)) render_bit(row_even, col, width, val);
+                if (!(odd  & 1)) render_bit(row_odd,  col, width, val);
+                col += width;
+            }
         }
+        /* col should now equal FIXED (29) */
+        even >>= 1;
+        odd  >>= 1;
     }
 
     draw(image, 0);
@@ -102,13 +128,6 @@ int main(int argc, char *argv[])
     char *ovalue   = NULL;
     DemoMode dmode = DEMO_GRAPHICS;
 
-    /*
-     * Options:
-     *   -l <n>     white level 0-100 (default 100; §1.6 specifies 70 IRE)
-     *   -m <mask>  even-field line mask (16-bit hex)
-     *   -o <mask>  odd-field line mask  (16-bit hex)
-     *   -d ascii   select ASCII demo mode (default: graphics)
-     */
     while ((c = getopt(argc, argv, "l:m:o:d:")) != -1) {
         switch (c) {
             case 'l':
@@ -138,7 +157,6 @@ int main(int argc, char *argv[])
     void *render_handle = render_start(WIDTH, height, OFFSET, FIXED,
                                        init, draw, -1, level);
 
-    /* '-' as final argument: read raw 36-byte packets from stdin */
     if (argc >= 2 &&
         strlen(argv[argc - 1]) == 1 &&
         argv[argc - 1][0] == '-') {
