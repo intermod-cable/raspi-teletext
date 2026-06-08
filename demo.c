@@ -122,46 +122,122 @@ static void push_null(void)
 }
 
 /*
- * push_page  –  slice nl_page[0..nl_len) into 28-byte NABTS packets on
- *               channel 0x001, correctly setting sync and full flags.
+ * make_dg_header  –  build the 8-byte Hamming-encoded Data Group Header
+ *                    (CEA-516 §4.2) into the first 8 bytes of dest[].
  *
- *  First packet in the sequence:   sync=1  (Synchronizing Packet, §4.1)
- *  Middle packets:                 sync=0, full=1
- *  Last packet if remainder < 28:  sync=0, full=0  (Data Block not full)
- *  Last packet if remainder == 28: sync=0, full=1
+ * @gc          Data Group Continuity (0..15, §4.2.3)
+ * @gr          Data Group Repetition (0=not repeated, §4.2.4)
+ * @num_packets total number of Data Packets in this Data Group
+ * @final_bytes number of useful bytes in the last Data Block (1..28)
  *
- *  One null packet is interleaved after each data packet so channel 0
- *  nulls continue flowing during the burst.
+ * Field layout (§4.2.1, Figure 9):
+ *   GT  = 0x0  (Data Group Type 0 = broadcast teletext, §4.2.2)
+ *   GC  = gc   (continuity counter)
+ *   GR  = gr   (repetition indicator)
+ *   S1,S2 = num_packets-1 split into two nibbles (§4.2.5)
+ *   F1,F2 = final_bytes   split into two nibbles (§4.2.6)
+ *   GN  = 0x0  (network routing, §4.2.7)
+ *
+ * All 8 bytes are Hamming-encoded per Figure 7.
  */
+static void make_dg_header(uint8_t *dest,
+                           uint8_t gc, uint8_t gr,
+                           int num_packets, int final_bytes)
+{
+    int S = num_packets - 1;   /* blocks following the sync packet's block */
+    int F = final_bytes;
+    dest[0] = nabts_hamming_enc[0x0];          /* GT = 0 */
+    dest[1] = nabts_hamming_enc[gc  & 0xF];    /* GC     */
+    dest[2] = nabts_hamming_enc[gr  & 0xF];    /* GR     */
+    dest[3] = nabts_hamming_enc[(S >> 4) & 0xF]; /* S1   */
+    dest[4] = nabts_hamming_enc[S        & 0xF]; /* S2   */
+    dest[5] = nabts_hamming_enc[(F >> 4) & 0xF]; /* F1   */
+    dest[6] = nabts_hamming_enc[F        & 0xF]; /* F2   */
+    dest[7] = nabts_hamming_enc[0x0];          /* GN = 0 */
+}
+
+/*
+ * push_page  –  slice nl_page[0..nl_len) into NABTS packets on channel 0x001.
+ *
+ * CEA-516 §4.1: a Data Group begins with a Synchronizing Packet (PS b2=1).
+ * CEA-516 §4.2: the Data Block of the Synchronizing Packet starts with the
+ *   8-byte Hamming-encoded Data Group Header (GT,GC,GR,S1,S2,F1,F2,GN).
+ *   The NAPLPS payload follows immediately after the header.
+ *
+ * Packet layout:
+ *   Packet 0 (sync=1): [8-byte DG header][up to 20 bytes NAPLPS]
+ *   Packets 1..N-1:    [up to 28 bytes NAPLPS]
+ *   Last packet sets full=0 if Data Block is not completely filled.
+ *
+ * One null packet is interleaved after each data packet.
+ *
+ * GC is incremented each call so receivers can detect lost Data Groups.
+ */
+static uint8_t page_gc = 0;   /* Data Group Continuity counter */
+
 static void push_page(void)
 {
-    int offset  = 0;
-    int first   = 1;
+    /* Pre-calculate packet count and final block size for DG header */
+    /* First packet holds 28-8=20 NAPLPS bytes; rest hold 28 each   */
+    int first_payload = NABTS_DATA_BLOCK_BYTES - 8;  /* 20 */
+    int num_packets, final_bytes;
+    if (nl_len <= first_payload) {
+        num_packets  = 1;
+        final_bytes  = (nl_len > 0) ? nl_len + 8 : 8; /* DG header + data */
+    } else {
+        int remaining = nl_len - first_payload;
+        int extra     = (remaining + NABTS_DATA_BLOCK_BYTES - 1) / NABTS_DATA_BLOCK_BYTES;
+        num_packets   = 1 + extra;
+        int last_chunk = remaining - (extra - 1) * NABTS_DATA_BLOCK_BYTES;
+        final_bytes   = last_chunk;  /* useful bytes in last block */
+        if (final_bytes == 0) final_bytes = NABTS_DATA_BLOCK_BYTES;
+    }
 
-    while (offset < nl_len) {
+    int naplps_offset = 0;
+    int first = 1;
+
+    while (naplps_offset < nl_len || first) {
         uint8_t data[NABTS_DATA_BLOCK_BYTES];
         memset(data, 0x00, sizeof(data));
+        int chunk, is_full;
 
-        int remaining = nl_len - offset;
-        int chunk     = (remaining >= NABTS_DATA_BLOCK_BYTES)
-                        ? NABTS_DATA_BLOCK_BYTES : remaining;
-        memcpy(data, nl_page + offset, (size_t)chunk);
-
-        int is_full = (chunk == NABTS_DATA_BLOCK_BYTES);
+        if (first) {
+            /* Synchronizing Packet: DG header occupies first 8 bytes */
+            make_dg_header(data, page_gc, 0, num_packets, final_bytes);
+            int space    = NABTS_DATA_BLOCK_BYTES - 8;
+            int avail    = nl_len - naplps_offset;
+            chunk        = (avail >= space) ? space : avail;
+            if (chunk > 0)
+                memcpy(data + 8, nl_page + naplps_offset, (size_t)chunk);
+            is_full      = ((8 + chunk) == NABTS_DATA_BLOCK_BYTES);
+            naplps_offset += chunk;
+        } else {
+            /* Standard Packet: pure NAPLPS payload */
+            int avail = nl_len - naplps_offset;
+            chunk     = (avail >= NABTS_DATA_BLOCK_BYTES)
+                        ? NABTS_DATA_BLOCK_BYTES : avail;
+            memcpy(data, nl_page + naplps_offset, (size_t)chunk);
+            is_full   = (chunk == NABTS_DATA_BLOCK_BYTES);
+            naplps_offset += chunk;
+        }
 
         uint8_t line[NABTS_LINE_BYTES];
         nabts_build_packet(line,
                            0x001,
                            nabts_ci_next(&ci_data),
-                           first,      /* sync flag */
-                           is_full,    /* full flag */
+                           first,
+                           is_full,
                            data);
         push_packet(line);
         push_null();
+        first = 0;
 
-        offset += chunk;
-        first   = 0;
+        /* Exit after processing the last chunk (avoids extra empty packet) */
+        if (naplps_offset >= nl_len && !is_full) break;
+        if (naplps_offset >= nl_len) break;
     }
+
+    page_gc = (page_gc + 1) & 0xF;
 }
 
 /* ── Scene elements ────────────────────────────────────────────────────── */
@@ -260,21 +336,41 @@ void demo_graphics(void)
 
 void demo_ascii(void)
 {
+    /*
+     * Single-packet Data Group on channel 0x00F.
+     *
+     * Data Block layout (CEA-516 §4.2):
+     *   bytes [0..7]  = 8-byte Hamming-encoded Data Group Header
+     *   bytes [8..27] = ASCII payload (20 bytes = "NABTS raspi-teletext")
+     * Total = 28 bytes = exactly full, so full=1.
+     *
+     * DG Header fields for a 1-packet group:
+     *   GT=0, GC=ident_gc, GR=0, S1=S2=0 (0 blocks after sync), F1=0,F2=0x1C (28), GN=0
+     *   S=0 because there are no Data Blocks following the Synchronizing Packet.
+     *   F=28 because the final (only) block is fully used.
+     */
+    uint8_t ident_gc = 0;
+
     while (1) {
-        /* Build a single-packet Data Group on channel 0x00F */
         uint8_t data[NABTS_DATA_BLOCK_BYTES];
         memset(data, 0x00, sizeof(data));
+
+        /* Data Group Header: 1 packet, final block = 28 bytes */
+        make_dg_header(data, ident_gc, 0, 1, NABTS_DATA_BLOCK_BYTES);
+
+        /* ASCII payload after the 8-byte header */
         const char *str = "NABTS raspi-teletext";
         int len = (int)strlen(str);
-        if (len > NABTS_DATA_BLOCK_BYTES) len = NABTS_DATA_BLOCK_BYTES;
-        memcpy(data, str, (size_t)len);
+        int space = NABTS_DATA_BLOCK_BYTES - 8;   /* 20 bytes available */
+        if (len > space) len = space;
+        memcpy(data + 8, str, (size_t)len);
 
         uint8_t line[NABTS_LINE_BYTES];
-        /* sync=1 (start of Data Group), full=0 (string < 28 bytes) */
+        /* sync=1 (Synchronizing Packet), full=1 (28 bytes used) */
         nabts_build_packet(line, 0x00F,
                            nabts_ci_next(&ci_ident),
-                           1,   /* sync */
-                           0,   /* not full */
+                           1,    /* sync */
+                           1,    /* full: header(8) + payload(20) = 28 */
                            data);
         push_packet(line);
 
@@ -282,6 +378,8 @@ void demo_ascii(void)
             push_null();
             usleep(3333);
         }
+
+        ident_gc = (ident_gc + 1) & 0xF;
     }
 }
 

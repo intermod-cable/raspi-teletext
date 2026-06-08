@@ -115,7 +115,7 @@ void *render_start(int width, int height, int offset, int fixed, InitFunc init_f
     vc_dispmanx_rect_set(&src_rect, 0, 0, width << 16, height << 16);
     vc_dispmanx_rect_set(&dst_rect, 0, 0, 720, height);
     r->element = vc_dispmanx_element_add(update, r->display, 2000,
-                                      &dst_rect, r->resource[2], &src_rect,
+                                      &dst_rect, r->resource[0], &src_rect,
                                       DISPMANX_PROTECTION_NONE,
                                       NULL, NULL, VC_IMAGE_ROT0);
 
