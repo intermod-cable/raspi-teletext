@@ -20,7 +20,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "/home/claude/raspi-teletext-nabts/nabts.h"
+#include "nabts.h"
 
 static int tests_run = 0, tests_pass = 0, tests_fail = 0;
 #define CHECK(label, cond) do { \
