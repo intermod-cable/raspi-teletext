@@ -51,8 +51,8 @@ void str_parity(uint8_t *str, size_t size, const char *format, ...)
     vsnprintf((char *)tmp, size+1, format, argList);
     va_end(argList);
 
-    int n;
-    for ( n=0; n<size; n++) {
+    size_t n;
+    for (n = 0; n < size; n++) {
         str[n] = parity(tmp[n]);
     }
 }

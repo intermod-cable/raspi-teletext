@@ -236,7 +236,18 @@ static inline uint8_t nabts_ci_next(nabts_ci_t *ci)
  * are spread across 349 source pixels instead of 288.
  *
  *   Effective bit rate = 6.9375 MHz × 288/349 = 5,724,928 Hz
- *   Error vs spec:      -0.04%  (spec tolerance: ±16 Hz — well within)
+ *   Error vs spec:      −2,344 Hz  (146× the ±16 Hz tolerance of §1.3)
+ *
+ * NOTE: The ±16 Hz tolerance in §1.3 is derived from PLL-locking the
+ * transmitter to the NTSC colour subcarrier (§1.3 note: "may be 8/5 of
+ * the color sub-carrier frequency … and may be frequency locked").  The
+ * Pi VEC in software composite mode is NOT subcarrier-locked; its pixel
+ * clock is a free-running PLL from the 19.2 MHz crystal (±50 ppm typical
+ * = ±286 Hz on the resulting bit rate), so the absolute ±16 Hz limit is
+ * unachievable regardless of pixel count.  No integer N at WIDTH=370
+ * meets the ±16 Hz window; N=349 is the closest achievable value.
+ * In practice NABTS decoder PLLs have capture ranges far wider than
+ * 16 Hz and lock reliably on this signal.
  *
  * 227 bits are rendered as 1 pixel wide; 61 bits as 2 pixels wide.
  * The doubled bits are distributed evenly by the Bresenham pattern.
@@ -277,5 +288,19 @@ static const uint8_t nabts_px_width[NABTS_TOTAL_BITS] = {
     1, 1, 1, 2, 1, 1, 1, 1, 2, 1, 1, 1, 1, 2, 1, 1,
     1, 2, 1, 1, 1, 1, 2, 1, 1, 1, 1, 2, 1, 1, 1, 2,
 };
+
+/* ── FSS Data Group size limits (CEA-516 §8.4.2.5) ─────────────────────────
+ *
+ * In the FSS service the maximum S value (S1,S2 decoded) is 67, meaning at
+ * most 68 Data Packets per Data Group.  With a 28-byte Data Block and no
+ * suffix the maximum NAPLPS payload is:
+ *   first packet:  28 - 8 (DG header) = 20 bytes
+ *   packets 2-68:  67 × 28            = 1876 bytes
+ *   total:                              1896 bytes
+ */
+#define NABTS_FSS_MAX_PACKETS  68
+#define NABTS_FSS_MAX_NAPLPS \
+    ((NABTS_DATA_BLOCK_BYTES - 8) + \
+     (NABTS_FSS_MAX_PACKETS - 1) * NABTS_DATA_BLOCK_BYTES)   /* 1896 */
 
 #endif /* NABTS_H */

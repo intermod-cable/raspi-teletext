@@ -53,6 +53,7 @@
 #include <unistd.h>
 
 #include "buffer.h"
+#include "hamming.h"
 #include "nabts.h"
 
 /* ── NAPLPS byte constants ─────────────────────────────────────────────── */
@@ -82,7 +83,12 @@ static int     nl_len;
 
 static void nl_byte(uint8_t b)
 {
-    if (nl_len < NL_PAGE_MAX) nl_page[nl_len++] = b;
+    /*
+     * CEA-516 §3.3: all Data Block bytes for Data Group Type 0 must be
+     * transmitted with odd parity (bit b8 is the parity bit).
+     * parity() sets bit 7 so that the total number of 1-bits is odd.
+     */
+    if (nl_len < NL_PAGE_MAX) nl_page[nl_len++] = parity(b);
 }
 static void nl_colour(uint8_t cmd, uint8_t col)
     { nl_byte(NL_ESC); nl_byte(cmd); nl_byte(col); }
@@ -177,6 +183,19 @@ static uint8_t page_gc = 0;   /* Data Group Continuity counter */
 
 static void push_page(void)
 {
+    /*
+     * CEA-516 §8.4.2.5: FSS Data Groups may not exceed 68 packets (S ≤ 67).
+     * With 28-byte Data Blocks this limits NAPLPS payload to 1896 bytes.
+     * Truncate silently and warn on stderr so callers can detect the issue.
+     */
+    if (nl_len > NABTS_FSS_MAX_NAPLPS) {
+        fprintf(stderr,
+                "nabts: push_page: page truncated from %d to %d bytes "
+                "(FSS max §8.4.2.5)\n",
+                nl_len, NABTS_FSS_MAX_NAPLPS);
+        nl_len = NABTS_FSS_MAX_NAPLPS;
+    }
+
     /* Pre-calculate packet count and final block size for DG header */
     /* First packet holds 28-8=20 NAPLPS bytes; rest hold 28 each   */
     int first_payload = NABTS_DATA_BLOCK_BYTES - 8;  /* 20 */
@@ -358,12 +377,14 @@ void demo_ascii(void)
         /* Data Group Header: 1 packet, final block = 28 bytes */
         make_dg_header(data, ident_gc, 0, 1, NABTS_DATA_BLOCK_BYTES);
 
-        /* ASCII payload after the 8-byte header */
+        /* ASCII payload after the 8-byte header.
+         * CEA-516 §3.3: each payload byte must have odd parity. */
         const char *str = "NABTS raspi-teletext";
         int len = (int)strlen(str);
         int space = NABTS_DATA_BLOCK_BYTES - 8;   /* 20 bytes available */
         if (len > space) len = space;
-        memcpy(data + 8, str, (size_t)len);
+        for (int k = 0; k < len; k++)
+            data[8 + k] = parity((uint8_t)str[k]);
 
         uint8_t line[NABTS_LINE_BYTES];
         /* sync=1 (Synchronizing Packet), full=1 (28 bytes used) */

@@ -24,8 +24,12 @@
  *
  * ── NTSC VBI geometry ────────────────────────────────────────────────────
  *
- *  height=32: 16 rows per field (interleaved), maps to VBI lines 10-17
- *  in field 1 and 272-279 in field 2.
+ *  height=24: 12 rows per field (interleaved), maps to VBI lines 10-21
+ *  in field 1 and 272-283 in field 2.
+ *
+ *  CEA-516 §1.1.1 permits data on lines 10 through 21 only (12 lines).
+ *  The previous value of 32 (16 lines/field) overshot into active video
+ *  lines 22-25, which violates the spec and produces visible noise.
  */
 
 #include <stdio.h>
@@ -50,7 +54,7 @@
 
 #define ROW(i, n) ((i) + (PITCH(WIDTH) * (n)) + OFFSET)
 
-int      height = 32;
+int      height = 24;   /* 12 rows/field → VBI lines 10-21 (CEA-516 §1.1.1) */
 uint16_t line_mask[2];
 
 
