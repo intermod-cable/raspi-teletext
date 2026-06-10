@@ -43,8 +43,10 @@
  * ── Byte budget per graphics frame ──────────────────────────────────────
  *
  *  clear(1) + set_bg(3) + 5 bars(85) + title(21) + box(17) + counter(19) = 146
- *  146 bytes / 28 bytes per packet = 6 packets (last has 6 data + 22 padding)
- *  NL_PAGE_MAX = 168 bytes (6 × 28)
+ *  Packet 1 (sync): 8-byte DG header + 20 NAPLPS bytes = 28, full
+ *  Packets 2-5:     28 NAPLPS bytes each = 112 bytes
+ *  Packet 6:        14 NAPLPS bytes + 14 padding  (final_bytes = 14)
+ *  Total = 6 packets; NL_PAGE_MAX = 168 bytes (6 × 28)
  */
 
 #include <stdio.h>
@@ -251,8 +253,6 @@ static void push_page(void)
         push_null();
         first = 0;
 
-        /* Exit after processing the last chunk (avoids extra empty packet) */
-        if (naplps_offset >= nl_len && !is_full) break;
         if (naplps_offset >= nl_len) break;
     }
 

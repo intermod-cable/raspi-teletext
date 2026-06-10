@@ -63,9 +63,9 @@ int try_set_regs(volatile unsigned int *regs, int argc, char *argv[])
         state = PAL_OFF;
     else if (regs[5] == 0x00040003 && regs[6] == 0x00120120 && regs[7] == 0x00030003 && regs[8] == 0x00120120)
         state = PAL_ON;
-    else if (regs[5] == 0x00100003 && regs[6] == 0x000300f0 && regs[7] == 0x00100003 && regs[8] == 0x000400f0)
+    if (regs[5] == 0x00100003 && regs[6] == 0x000300f0 && regs[7] == 0x00100003 && regs[8] == 0x000400f0)
         state = NTSC_OFF;
-    else if (regs[5] == 0x000e0003 && regs[6] == 0x000500f0 && regs[7] == 0x000f0003 && regs[8] == 0x000500f0)
+    else if (regs[5] == 0x000a0003 && regs[6] == 0x000900f0 && regs[7] == 0x000a0003 && regs[8] == 0x000a00f0)
         state = NTSC_ON;
     else
         state = UNKNOWN;
@@ -86,13 +86,17 @@ int try_set_regs(volatile unsigned int *regs, int argc, char *argv[])
                 fprintf(stderr, "Teletext output is now on.\n");
                 return 1;
             case NTSC_OFF:
-                regs[5] = 0x000e0003;
-                regs[6] = 0x000500f0;
-                regs[7] = 0x000f0003;
-                regs[8] = 0x000500f0;
+                /* Shift framebuffer to start at line 10 (CEA-516 §1.1.1).
+                 * above=0x0A places row 0 at line 10; rows 0-11 cover lines
+                 * 10-21 (the 12 legal NABTS VBI lines, both fields).
+                 * Field totals: 10+3+240+9=262 (field1), 10+3+240+10=263 (field2). */
+                regs[5] = 0x000a0003;
+                regs[6] = 0x000900f0;
+                regs[7] = 0x000a0003;
+                regs[8] = 0x000a00f0;
                 /* fallthrough */
             case NTSC_ON:
-                fprintf(stderr, "CEA608 output is now on.\n");
+                fprintf(stderr, "NABTS output is now on.\n");
                 return 1;
             default:
                 return 0;
@@ -117,7 +121,7 @@ int try_set_regs(volatile unsigned int *regs, int argc, char *argv[])
                 regs[8] = 0x000400f0;
                 /* fallthrough */
             case NTSC_OFF:
-                fprintf(stderr, "CEA608 output is now off.\n");
+                fprintf(stderr, "NABTS output is now off.\n");
                 return 1;
             default:
                 return 0;

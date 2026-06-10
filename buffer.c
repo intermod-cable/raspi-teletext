@@ -30,16 +30,18 @@ static uint8_t tt_buffer[NBUFFERS][NABTS_LINE_BYTES];
 static volatile uint8_t buffer_head = 0;
 static volatile uint8_t buffer_tail = 0;
 
-static uint8_t fill_buffer[NABTS_LINE_BYTES];
+static nabts_ci_t ci_fill = {0};   /* CI tracker for filler packets (§3.2.4) */
 
-static void init_fill_buffer(void)
+/*
+ * make_fill_packet  –  build a fresh filler packet with the next CI value.
+ * Called every time the queue is empty so CI increments continuously,
+ * as required by CEA-516 §3.2.4 (CI must increment per transmitted packet).
+ */
+static void make_fill_packet(uint8_t *out)
 {
-    static int done = 0;
-    if (done) return;
     uint8_t zero_data[NABTS_DATA_BLOCK_BYTES];
     memset(zero_data, 0x00, sizeof(zero_data));
-    nabts_build_packet(fill_buffer, 0x000, 0, 0, 1, zero_data);
-    done = 1;
+    nabts_build_packet(out, 0x000, nabts_ci_next(&ci_fill), 0, 1, zero_data);
 }
 
 /*
@@ -78,9 +80,10 @@ static void copy_packet(const uint8_t *src, uint8_t *dest)
 
 void get_packet(uint8_t *dest)
 {
-    init_fill_buffer();
     if (buffer_head == buffer_tail) {
-        copy_packet(fill_buffer, dest);
+        uint8_t fill[NABTS_LINE_BYTES];
+        make_fill_packet(fill);
+        copy_packet(fill, dest);
     } else {
         copy_packet(tt_buffer[buffer_tail], dest);
         buffer_tail = (buffer_tail + 1) % NBUFFERS;
