@@ -65,10 +65,13 @@ int try_set_regs(volatile unsigned int *regs, int argc, char *argv[])
         state = PAL_ON;
     else if (regs[5] == 0x00100003 && regs[6] == 0x000300f0 && regs[7] == 0x00100003 && regs[8] == 0x000400f0)
         state = NTSC_OFF;
+    else if (regs[5] == 0x00070003 && regs[6] == 0x000c00f0 && regs[7] == 0x00070003 && regs[8] == 0x000d00f0)
+        state = NTSC_ON;
+    /* Previous incorrect fix (above1=10 → line 13) and old CEA-608 values
+     * (above1=14/15 → lines 17/18): treat both as NTSC_ON so 'on' rewrites
+     * them to the correct position and 'off' can restore cleanly. */
     else if (regs[5] == 0x000a0003 && regs[6] == 0x000900f0 && regs[7] == 0x000a0003 && regs[8] == 0x000a00f0)
         state = NTSC_ON;
-    /* Old CEA-608 binary left these values; treat as NTSC_ON so 'on' rewrites
-     * them to the correct NABTS position and 'off' can restore cleanly. */
     else if (regs[5] == 0x000e0003 && regs[6] == 0x000500f0 && regs[7] == 0x000f0003 && regs[8] == 0x000500f0)
         state = NTSC_ON;
     else
@@ -91,18 +94,19 @@ int try_set_regs(volatile unsigned int *regs, int argc, char *argv[])
                 return 1;
             case NTSC_OFF:
                 /* Shift framebuffer to start at line 10 (CEA-516 §1.1.1).
-                 * above=0x0A places row 0 at line 10; rows 0-11 cover lines
-                 * 10-21 (the 12 legal NABTS VBI lines, both fields).
-                 * Field totals: 10+3+240+9=262 (field1), 10+3+240+10=263 (field2). */
+                 * reg[5] lower half is always 0x0003; the first display line
+                 * = upper(reg5) + lower(reg5) = above1 + 3.  To hit line 10:
+                 * above1 = 10 - 3 = 7 = 0x07.
+                 * Field totals: 7+3+240+12=262 (field1), 7+3+240+13=263 (field2). */
                 /* fallthrough */
             case NTSC_ON:
                 /* Always write the correct NABTS values — handles the case
                  * where the old CEA-608 binary left the registers at the
                  * wrong position (lines 14/15 instead of lines 10/10). */
-                regs[5] = 0x000a0003;
-                regs[6] = 0x000900f0;
-                regs[7] = 0x000a0003;
-                regs[8] = 0x000a00f0;
+                regs[5] = 0x00070003;
+                regs[6] = 0x000c00f0;
+                regs[7] = 0x00070003;
+                regs[8] = 0x000d00f0;
                 fprintf(stderr, "NABTS output is now on.\n");
                 return 1;
             default:
