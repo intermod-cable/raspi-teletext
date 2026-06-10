@@ -20,7 +20,7 @@
  *
  *  FIXED = 29 pixels  (first 24 bits of the 349-pixel sequence)
  *  Data  = 320 pixels (remaining 264 bits)
- *  Total = 349 pixels per line; fits in WIDTH=370 with OFFSET=8.
+ *  Total = 349 pixels per line; fits in WIDTH=370 with OFFSET=14.
  *
  * ── NTSC VBI geometry ────────────────────────────────────────────────────
  *
@@ -44,7 +44,23 @@
 #include "demo.h"
 
 #define WIDTH   370
-#define OFFSET  8
+/*
+ * OFFSET = 14 source pixels.
+ *
+ * CEA-516 §1.2 requires the data burst to begin no sooner than 10.9 µs and
+ * no later than 12.0 µs after the leading edge of horizontal sync.
+ *
+ * NTSC active video starts ~9.4 µs after the sync leading edge.
+ * Each source pixel is stretched to 720/370 display pixels by dispmanx,
+ * so the signal start time from sync = 9.4 µs + OFFSET*(720/370)/13.5 MHz.
+ *
+ *   OFFSET= 8 -> 10.55 us  (inherited from WST fork; within WST >=10.3 us
+ *                            but OUTSIDE the NABTS >=10.9 us minimum)
+ *   OFFSET=14 -> 11.42 us  (centre of the 10.9-12.0 us NABTS window) OK
+ *
+ * Total pixels used: OFFSET(14) + FIXED(29) + DATA_PIXELS(320) = 363 <= 370.
+ */
+#define OFFSET  14
 
 /*
  * FIXED = 29: the number of source pixels occupied by the 24-bit preamble

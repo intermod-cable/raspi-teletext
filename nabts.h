@@ -77,6 +77,8 @@
  *  copy_packet() renders the 264-bit Data Packet into the 320 pixels that
  *  follow.
  *  Total = 29 + 320 = 349 pixels per line (effective bit rate 5,724,928 Hz).
+ *  With OFFSET=14 the signal starts at 11.42 µs after sync leading edge,
+ *  centred in the CEA-516 §1.2 window of 10.9–12.0 µs.
  */
 
 /* ── Wire constants ─────────────────────────────────────────────────────── */
