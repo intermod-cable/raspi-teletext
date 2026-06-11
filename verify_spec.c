@@ -183,7 +183,7 @@ static void test_geometry(void) {
     CHECK("G9  FIXED==29",             NABTS_FIXED==29);
     CHECK("G10 DATA_PIXELS==320",      NABTS_DATA_PIXELS==320);
     CHECK("G11 FIXED+DATA_PIXELS==349",NABTS_FIXED+NABTS_DATA_PIXELS==349);
-    CHECK("G12 349 <= 370-8 (fits in WIDTH-OFFSET)", 349<=370-8);
+    CHECK("G12 349 <= 370-14 (fits in WIDTH with NABTS OFFSET=14)", 349<=370-14);
     CHECK("G13 FIXED!=24 (old WST/wrong value gone)", NABTS_FIXED!=24);
     CHECK("G14 LINE_BYTES!=40 (old RS value gone)",   NABTS_LINE_BYTES!=40);
 }

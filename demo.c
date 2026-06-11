@@ -365,7 +365,8 @@ void demo_ascii(void)
      * Total = 28 bytes = exactly full, so full=1.
      *
      * DG Header fields for a 1-packet group:
-     *   GT=0, GC=ident_gc, GR=0, S1=S2=0 (0 blocks after sync), F1=0,F2=0x1C (28), GN=0
+     *   GT=0, GC=ident_gc, GR=0, S1=S2=0 (0 blocks after sync),
+     *   F1=1 (Hamming→0x02), F2=0xC (Hamming→0xA1) → decoded F=(1<<4)|0xC=28, GN=0
      *   S=0 because there are no Data Blocks following the Synchronizing Packet.
      *   F=28 because the final (only) block is fully used.
      */

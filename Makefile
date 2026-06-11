@@ -17,11 +17,16 @@ LDFLAGS += -L$(SDKSTAGE)/opt/vc/lib/ -lbcm_host -pthread
 INCLUDES += -I$(SDKSTAGE)/opt/vc/include/ -I./
 
 TELETEXT_OFILES = teletext.o render.o buffer.o hamming.o demo.o
+CEA608_OFILES   = cea608.o cea608buffer.o render.o
 
-all: tvctl teletext
+all: tvctl teletext cea608
 
 teletext: $(TELETEXT_OFILES)
 	$(CC) -o $@ -Wl,--whole-archive $(TELETEXT_OFILES) $(LDFLAGS) \
+	      -Wl,--no-whole-archive -rdynamic
+
+cea608: $(CEA608_OFILES)
+	$(CC) -o $@ -Wl,--whole-archive $(CEA608_OFILES) $(LDFLAGS) \
 	      -Wl,--no-whole-archive -rdynamic
 
 tvctl: tvctl.o
@@ -32,4 +37,4 @@ tvctl: tvctl.o
 	$(CC) $(CFLAGS) $(INCLUDES) -g -c $< -o $@ -Wno-deprecated-declarations
 
 clean:
-	rm -f *.o teletext tvctl
+	rm -f *.o teletext cea608 tvctl
