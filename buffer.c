@@ -30,18 +30,22 @@ static uint8_t tt_buffer[NBUFFERS][NABTS_LINE_BYTES];
 static volatile uint8_t buffer_head = 0;
 static volatile uint8_t buffer_tail = 0;
 
-static nabts_ci_t ci_fill = {0};   /* CI tracker for filler packets (§3.2.4) */
-
 /*
- * make_fill_packet  –  build a fresh filler packet with the next CI value.
- * Called every time the queue is empty so CI increments continuously,
- * as required by CEA-516 §3.2.4 (CI must increment per transmitted packet).
+ * ci_null  –  single CI counter for ALL channel-0x000 packets.
+ *
+ * Both get_packet() (filler path) and demo.c's push_null() must use the
+ * same counter.  If they used separate counters the decoder would see
+ * non-monotonic CI on channel 0x000 whenever the queue drains and the
+ * filler path takes over, violating CEA-516 §3.2.4.
+ *
+ * Ownership lives here (buffer.c) because get_packet() is the lowest-level
+ * emission point; demo.c reaches it through null_ci_next() exported in buffer.h.
  */
-static void make_fill_packet(uint8_t *out)
+static nabts_ci_t ci_null_state = {0};
+
+uint8_t null_ci_next(void)
 {
-    uint8_t zero_data[NABTS_DATA_BLOCK_BYTES];
-    memset(zero_data, 0x00, sizeof(zero_data));
-    nabts_build_packet(out, 0x000, nabts_ci_next(&ci_fill), 0, 1, zero_data);
+    return nabts_ci_next(&ci_null_state);
 }
 
 /*
@@ -81,8 +85,11 @@ static void copy_packet(const uint8_t *src, uint8_t *dest)
 void get_packet(uint8_t *dest)
 {
     if (buffer_head == buffer_tail) {
+        /* Queue empty: emit a filler packet using the shared null-channel CI. */
+        uint8_t zero_data[NABTS_DATA_BLOCK_BYTES];
         uint8_t fill[NABTS_LINE_BYTES];
-        make_fill_packet(fill);
+        memset(zero_data, 0x00, sizeof(zero_data));
+        nabts_build_packet(fill, 0x000, null_ci_next(), 0, 1, zero_data);
         copy_packet(fill, dest);
     } else {
         copy_packet(tt_buffer[buffer_tail], dest);

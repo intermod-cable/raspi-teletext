@@ -143,7 +143,15 @@ void init(uint8_t *image)
 
 int main(int argc, char *argv[])
 {
-    int   c, level = 100;
+    /*
+     * Default signal level = 71 (%).
+     * render.c maps this to level_adj = (71*31)/100 = 22, giving
+     * 22/31 * 100 = 71.0 IRE for logic-1 pixels.
+     * CEA-516 §1.6 requires logic-1 = 70 ± 2 IRE.
+     * The WST-inherited default of 100 (100 IRE) is 30 IRE over the NABTS
+     * maximum and can prevent amplitude-sensitive decoders from locking.
+     */
+    int   c, level = 71;
     char *mvalue   = NULL;
     char *ovalue   = NULL;
     DemoMode dmode = DEMO_GRAPHICS;

@@ -110,22 +110,23 @@ static void nl_text(const char *s) { while (*s) nl_byte((uint8_t)*s++); }
 
 /* ── Per-channel CI trackers ───────────────────────────────────────────── */
 
-static nabts_ci_t ci_null  = {0};   /* channel 0x000 */
+/* channel 0x000 null CI is owned by buffer.c and shared via null_ci_next() */
 static nabts_ci_t ci_data  = {0};   /* channel 0x001 */
 static nabts_ci_t ci_ident = {0};   /* channel 0x00F */
 
 /* ── Packet helpers ────────────────────────────────────────────────────── */
 
 /*
- * push_null  –  Standard filler packet on channel 0.
- * Keeps decoder PLL locked between data bursts.
+ * push_null  –  Standard filler packet on channel 0x000.
+ * Uses null_ci_next() (buffer.c) so the CI is shared with the get_packet()
+ * filler path — both paths emit on channel 0x000 and must use one counter.
  */
 static void push_null(void)
 {
     uint8_t line[NABTS_LINE_BYTES];
     uint8_t data[NABTS_DATA_BLOCK_BYTES];
     memset(data, 0x00, sizeof(data));
-    nabts_build_packet(line, 0x000, nabts_ci_next(&ci_null), 0, 1, data);
+    nabts_build_packet(line, 0x000, null_ci_next(), 0, 1, data);
     push_packet(line);
 }
 
