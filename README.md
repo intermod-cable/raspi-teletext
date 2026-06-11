@@ -31,7 +31,15 @@ enable_tvout=1
 
 Reboot with the HDMI cable unplugged.
 
-### 2. Build
+### 2. Prerequisites
+
+Tested with Raspbian 12 (Raspbian 13 was reported to not work in the upstream project. We need the following libraries for our build process.
+
+```bash
+sudo apt install libraspberrypi-dev raspi-gpio
+```
+
+### 3. Build
 
 ```bash
 make
@@ -41,7 +49,7 @@ Requires the Raspberry Pi userland SDK (`/opt/vc`) for `bcm_host` and
 `dispmanx`. Build on the Pi itself or cross-compile with `SDKSTAGE` pointing
 at a sysroot containing the SDK.
 
-### 3. Shift the framebuffer into the VBI
+### 4. Shift the framebuffer into the VBI
 
 ```bash
 sudo ./tvctl on
@@ -55,7 +63,7 @@ restore normal output.
 `tvctl` checks the register state before acting; it will not proceed if
 the registers are in an unknown state.
 
-### 4. Run
+### 5. Run
 
 ```bash
 # NAPLPS graphics demo — colour bars, bouncing box, frame counter (default)
