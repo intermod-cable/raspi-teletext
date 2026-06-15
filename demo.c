@@ -9,11 +9,28 @@
  *   demo_ascii()     –  plain ASCII identification packets; useful for
  *                       verifying decoder lock before attempting NAPLPS.
  *
+ * ── Page addressing (CEA-516 §7.5.2) ────────────────────────────────────
+ *
+ *  Page 100 in Magazine 1:
+ *    Short Record Address = 100 decimal = 0x064 hex
+ *      A1 = 0x0, A2 = 0x6, A3 = 0x4
+ *    Data Channel (= Magazine number) = 0x100
+ *
+ *  The Record Header (§5.2) is the first thing in the Data Group Data,
+ *  immediately after the 8-byte Data Group Header.  A minimal Record
+ *  Header for a cyclic presentation page (§5.2.2.2) consists of:
+ *    RT  – Record Type = 0  (Presentation Record, cyclic teletext)
+ *    RD  – Record Header Designator (no optional sub-groups present)
+ *    A1  – most-significant address nibble  (0x0)
+ *    A2  – middle address nibble            (0x6)
+ *    A3  – least-significant address nibble (0x4)
+ *  All five bytes are Hamming-encoded (§5.2.1).
+ *  NAPLPS presentation data follows immediately after A3.
+ *
  * ── CEA-516 packet usage ─────────────────────────────────────────────────
  *
  *  channel 0x000  –  null / filler packets (Standard, full, CI incrementing)
- *  channel 0x001  –  NAPLPS presentation data (graphics demo)
- *  channel 0x00F  –  ASCII identification packets (ascii demo)
+ *  channel 0x100  –  all demo data (graphics and ascii), page 100
  *
  *  Data Group structure (CEA-516 §4):
  *    First packet of a Data Group:  sync=1 (Synchronizing Packet, b2=1 in PS)
@@ -42,10 +59,11 @@
  *
  * ── Byte budget per graphics frame ──────────────────────────────────────
  *
- *  clear(1) + set_bg(3) + 5 bars(85) + title(21) + box(17) + counter(19) = 146
- *  Packet 1 (sync): 8-byte DG header + 20 NAPLPS bytes = 28, full
+ *  Record Header (5) + clear(1) + set_bg(3) + 5 bars(85) + title(21)
+ *    + box(17) + counter(19) = 151 bytes
+ *  Packet 1 (sync): 8-byte DG header + 20 bytes (rec hdr 5 + NAPLPS 15) = 28, full
  *  Packets 2-5:     28 NAPLPS bytes each = 112 bytes
- *  Packet 6:        14 NAPLPS bytes + 14 padding  (final_bytes = 14)
+ *  Packet 6:        19 NAPLPS bytes + 9 padding  (final_bytes = 19)
  *  Total = 6 packets; NL_PAGE_MAX = 168 bytes (6 × 28)
  */
 
@@ -108,11 +126,28 @@ static void nl_move(uint8_t x, uint8_t y) {
 }
 static void nl_text(const char *s) { while (*s) nl_byte((uint8_t)*s++); }
 
+/* ── Page 100 addressing (CEA-516 §7.5.2) ──────────────────────────────── */
+/*
+ * User page number 100 → Short Record Address 0x064 → A1=0x0, A2=0x6, A3=0x4
+ * Magazine 1 → Data Channel 0x100
+ *
+ * Record Header (§5.2.1): RT, RD, A1, A2, A3 — all Hamming-encoded.
+ *   RT = 0x0  (Record Type 0: cyclic Presentation Record, §5.2.2.2)
+ *   RD = 0x0  (no optional sub-groups: no address extension, no link,
+ *               no classification sequence, no header extension, §5.2.3)
+ *   A1 = 0x0, A2 = 0x6, A3 = 0x4
+ */
+#define PAGE_CHANNEL  0x100u   /* Data Channel = Magazine 1       */
+#define PAGE_ADDR_A1  0x0u     /* most-significant nibble of 0x064 */
+#define PAGE_ADDR_A2  0x6u     /* middle nibble                    */
+#define PAGE_ADDR_A3  0x4u     /* least-significant nibble         */
+
+#define NABTS_REC_HDR_BYTES  5   /* RT + RD + A1 + A2 + A3          */
+
 /* ── Per-channel CI trackers ───────────────────────────────────────────── */
 
 /* channel 0x000 null CI is owned by buffer.c and shared via null_ci_next() */
-static nabts_ci_t ci_data  = {0};   /* channel 0x001 */
-static nabts_ci_t ci_ident = {0};   /* channel 0x00F */
+static nabts_ci_t ci_data  = {0};   /* channel 0x100 (page 100), both demos */
 
 /* ── Packet helpers ────────────────────────────────────────────────────── */
 
@@ -166,15 +201,34 @@ static void make_dg_header(uint8_t *dest,
 }
 
 /*
- * push_page  –  slice nl_page[0..nl_len) into NABTS packets on channel 0x001.
+ * make_rec_header  –  build the 5-byte Hamming-encoded Record Header
+ *                     (CEA-516 §5.2.1) into dest[0..4].
+ *
+ * Emits: RT(0=cyclic presentation), RD(0=no optional fields), A1, A2, A3.
+ * All bytes are Hamming-encoded (§5.2.1 "five Hamming-encoded bytes").
+ */
+static void make_rec_header(uint8_t *dest,
+                             uint8_t a1, uint8_t a2, uint8_t a3)
+{
+    dest[0] = nabts_hamming_enc[0x0 & 0xF];   /* RT = 0 (cyclic presentation) */
+    dest[1] = nabts_hamming_enc[0x0 & 0xF];   /* RD = 0 (no optional fields)  */
+    dest[2] = nabts_hamming_enc[a1  & 0xF];   /* A1                           */
+    dest[3] = nabts_hamming_enc[a2  & 0xF];   /* A2                           */
+    dest[4] = nabts_hamming_enc[a3  & 0xF];   /* A3                           */
+}
+
+/*
+ * push_page  –  slice nl_page[0..nl_len) into NABTS packets on PAGE_CHANNEL.
  *
  * CEA-516 §4.1: a Data Group begins with a Synchronizing Packet (PS b2=1).
  * CEA-516 §4.2: the Data Block of the Synchronizing Packet starts with the
  *   8-byte Hamming-encoded Data Group Header (GT,GC,GR,S1,S2,F1,F2,GN).
- *   The NAPLPS payload follows immediately after the header.
+ * CEA-516 §5.2: the Record Header immediately follows the Data Group Header.
+ *   Minimal Record Header = RT + RD + A1 + A2 + A3 = 5 Hamming bytes.
+ *   NAPLPS payload follows immediately after A3.
  *
  * Packet layout:
- *   Packet 0 (sync=1): [8-byte DG header][up to 20 bytes NAPLPS]
+ *   Packet 0 (sync=1): [8-byte DG hdr][5-byte rec hdr][up to 15 bytes NAPLPS]
  *   Packets 1..N-1:    [up to 28 bytes NAPLPS]
  *   Last packet sets full=0 if Data Block is not completely filled.
  *
@@ -199,19 +253,22 @@ static void push_page(void)
         nl_len = NABTS_FSS_MAX_NAPLPS;
     }
 
-    /* Pre-calculate packet count and final block size for DG header */
-    /* First packet holds 28-8=20 NAPLPS bytes; rest hold 28 each   */
-    int first_payload = NABTS_DATA_BLOCK_BYTES - 8;  /* 20 */
+    /*
+     * First packet holds the DG header (8) + Record Header (5) + NAPLPS.
+     * Space for NAPLPS in the first packet = 28 - 8 - 5 = 15 bytes.
+     */
+    int first_payload = NABTS_DATA_BLOCK_BYTES - 8 - NABTS_REC_HDR_BYTES;  /* 15 */
     int num_packets, final_bytes;
     if (nl_len <= first_payload) {
         num_packets  = 1;
-        final_bytes  = (nl_len > 0) ? nl_len + 8 : 8; /* DG header + data */
+        /* DG header(8) + rec header(5) + NAPLPS data = total useful bytes */
+        final_bytes  = 8 + NABTS_REC_HDR_BYTES + nl_len;
     } else {
         int remaining = nl_len - first_payload;
         int extra     = (remaining + NABTS_DATA_BLOCK_BYTES - 1) / NABTS_DATA_BLOCK_BYTES;
         num_packets   = 1 + extra;
         int last_chunk = remaining - (extra - 1) * NABTS_DATA_BLOCK_BYTES;
-        final_bytes   = last_chunk;  /* useful bytes in last block */
+        final_bytes   = last_chunk;
         if (final_bytes == 0) final_bytes = NABTS_DATA_BLOCK_BYTES;
     }
 
@@ -224,14 +281,17 @@ static void push_page(void)
         int chunk, is_full;
 
         if (first) {
-            /* Synchronizing Packet: DG header occupies first 8 bytes */
+            /* Synchronizing Packet: DG header (8) + Record Header (5) */
             make_dg_header(data, page_gc, 0, num_packets, final_bytes);
-            int space    = NABTS_DATA_BLOCK_BYTES - 8;
-            int avail    = nl_len - naplps_offset;
-            chunk        = (avail >= space) ? space : avail;
+            make_rec_header(data + 8,
+                            PAGE_ADDR_A1, PAGE_ADDR_A2, PAGE_ADDR_A3);
+            int space = NABTS_DATA_BLOCK_BYTES - 8 - NABTS_REC_HDR_BYTES; /* 15 */
+            int avail = nl_len - naplps_offset;
+            chunk     = (avail >= space) ? space : avail;
             if (chunk > 0)
-                memcpy(data + 8, nl_page + naplps_offset, (size_t)chunk);
-            is_full      = ((8 + chunk) == NABTS_DATA_BLOCK_BYTES);
+                memcpy(data + 8 + NABTS_REC_HDR_BYTES,
+                       nl_page + naplps_offset, (size_t)chunk);
+            is_full   = ((8 + NABTS_REC_HDR_BYTES + chunk) == NABTS_DATA_BLOCK_BYTES);
             naplps_offset += chunk;
         } else {
             /* Standard Packet: pure NAPLPS payload */
@@ -245,7 +305,7 @@ static void push_page(void)
 
         uint8_t line[NABTS_LINE_BYTES];
         nabts_build_packet(line,
-                           0x001,
+                           PAGE_CHANNEL,
                            nabts_ci_next(&ci_data),
                            first,
                            is_full,
@@ -344,11 +404,26 @@ void demo_graphics(void)
 /* ── demo_ascii ────────────────────────────────────────────────────────── */
 
 /*
- * Emits a Synchronizing Packet on channel 0x00F carrying a plain ASCII
- * string every ~1 second, with null packets between bursts.
+ * Emits a single-packet Data Group on PAGE_CHANNEL (0x100) carrying a plain
+ * ASCII identification string every ~1 second, with null packets between
+ * bursts.
  *
- * This is the minimal signal for verifying decoder lock before NAPLPS.
- * The payload is placed raw in the Data Block; it is not NAPLPS-encoded.
+ * Like demo_graphics() this uses PAGE_CHANNEL and includes the 5-byte Record
+ * Header (§5.2) so the decoder associates the packet with page 100.  The
+ * ci_data CI tracker is shared with demo_graphics() since both transmit on
+ * the same channel; whichever demo is running owns ci_data exclusively.
+ *
+ * Data Block layout (CEA-516 §4.2 / §5.2):
+ *   bytes [0..7]  = 8-byte Hamming-encoded Data Group Header
+ *   bytes [8..12] = 5-byte Hamming-encoded Record Header (RT,RD,A1,A2,A3)
+ *   bytes [13..27]= ASCII payload (15 bytes, odd-parity, §3.3)
+ * Total = 28 bytes = exactly full, so full=1.
+ *
+ * DG Header fields:
+ *   GT=0, GC=page_gc (shared), GR=0
+ *   S1=S2=0  (no Data Blocks follow the Synchronizing Packet)
+ *   F1,F2 → decoded F=28  (final block fully used)
+ *   GN=0
  *
  * Usage: sudo ./teletext -d ascii
  */
@@ -356,44 +431,32 @@ void demo_graphics(void)
 
 void demo_ascii(void)
 {
-    /*
-     * Single-packet Data Group on channel 0x00F.
-     *
-     * Data Block layout (CEA-516 §4.2):
-     *   bytes [0..7]  = 8-byte Hamming-encoded Data Group Header
-     *   bytes [8..27] = ASCII payload (20 bytes = "NABTS raspi-teletext")
-     * Total = 28 bytes = exactly full, so full=1.
-     *
-     * DG Header fields for a 1-packet group:
-     *   GT=0, GC=ident_gc, GR=0, S1=S2=0 (0 blocks after sync),
-     *   F1=1 (Hamming→0x02), F2=0xC (Hamming→0xA1) → decoded F=(1<<4)|0xC=28, GN=0
-     *   S=0 because there are no Data Blocks following the Synchronizing Packet.
-     *   F=28 because the final (only) block is fully used.
-     */
-    uint8_t ident_gc = 0;
-
     while (1) {
         uint8_t data[NABTS_DATA_BLOCK_BYTES];
         memset(data, 0x00, sizeof(data));
 
-        /* Data Group Header: 1 packet, final block = 28 bytes */
-        make_dg_header(data, ident_gc, 0, 1, NABTS_DATA_BLOCK_BYTES);
+        /* Data Group Header: 1 packet, final block = 28 bytes (full) */
+        make_dg_header(data, page_gc, 0, 1, NABTS_DATA_BLOCK_BYTES);
 
-        /* ASCII payload after the 8-byte header.
+        /* Record Header: ties this packet to page 100 on Magazine 1 */
+        make_rec_header(data + 8,
+                        PAGE_ADDR_A1, PAGE_ADDR_A2, PAGE_ADDR_A3);
+
+        /* ASCII payload after header + Record Header.
          * CEA-516 §3.3: each payload byte must have odd parity. */
-        const char *str = "NABTS raspi-teletext";
-        int len = (int)strlen(str);
-        int space = NABTS_DATA_BLOCK_BYTES - 8;   /* 20 bytes available */
+        const char *str = "NABTS raspi-teletext p100";
+        int space = NABTS_DATA_BLOCK_BYTES - 8 - NABTS_REC_HDR_BYTES;  /* 15 */
+        int len   = (int)strlen(str);
         if (len > space) len = space;
         for (int k = 0; k < len; k++)
-            data[8 + k] = parity((uint8_t)str[k]);
+            data[8 + NABTS_REC_HDR_BYTES + k] = parity((uint8_t)str[k]);
 
         uint8_t line[NABTS_LINE_BYTES];
-        /* sync=1 (Synchronizing Packet), full=1 (28 bytes used) */
-        nabts_build_packet(line, 0x00F,
-                           nabts_ci_next(&ci_ident),
+        /* sync=1 (Synchronizing Packet), full=1 (all 28 bytes used) */
+        nabts_build_packet(line, PAGE_CHANNEL,
+                           nabts_ci_next(&ci_data),
                            1,    /* sync */
-                           1,    /* full: header(8) + payload(20) = 28 */
+                           1,    /* full: 8+5+15 = 28 */
                            data);
         push_packet(line);
 
@@ -402,7 +465,7 @@ void demo_ascii(void)
             usleep(3333);
         }
 
-        ident_gc = (ident_gc + 1) & 0xF;
+        page_gc = (page_gc + 1) & 0xF;
     }
 }
 
