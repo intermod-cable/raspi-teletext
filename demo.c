@@ -59,11 +59,16 @@
  *
  * ── Byte budget per graphics frame ──────────────────────────────────────
  *
- *  Record Header (5) + clear(1) + set_bg(3) + 5 bars(85) + title(21)
- *    + box(17) + counter(19) = 151 bytes
- *  Packet 1 (sync): 8-byte DG header + 20 bytes (rec hdr 5 + NAPLPS 15) = 28, full
+ *  nl_page NAPLPS bytes (nl_len):
+ *    clear(1) + set_bg(3) + 5 bars(85) + title(21) + box(17) + counter(19)
+ *    = 146 bytes
+ *  (The 5-byte Record Header is added by push_page() inside the Data Block,
+ *   not stored in nl_page.  The old comment mistakenly counted it here,
+ *   giving 151 instead of 146.)
+ *
+ *  Packet 1 (sync): 8-byte DG header + 5-byte Rec Hdr + 15 NAPLPS = 28, full
  *  Packets 2-5:     28 NAPLPS bytes each = 112 bytes
- *  Packet 6:        19 NAPLPS bytes + 9 padding  (final_bytes = 19)
+ *  Packet 6:        19 NAPLPS bytes + 9 × 0x80 padding  (final_bytes = 19)
  *  Total = 6 packets; NL_PAGE_MAX = 168 bytes (6 × 28)
  */
 
@@ -160,7 +165,8 @@ static void push_null(void)
 {
     uint8_t line[NABTS_LINE_BYTES];
     uint8_t data[NABTS_DATA_BLOCK_BYTES];
-    memset(data, 0x00, sizeof(data));
+    /* CEA-516 §3.3: use 0x80 (odd parity of zero) not 0x00 (even parity). */
+    memset(data, 0x80, sizeof(data));
     nabts_build_packet(line, 0x000, null_ci_next(), 0, 1, data);
     push_packet(line);
 }
@@ -277,7 +283,11 @@ static void push_page(void)
 
     while (naplps_offset < nl_len || first) {
         uint8_t data[NABTS_DATA_BLOCK_BYTES];
-        memset(data, 0x00, sizeof(data));
+        /* CEA-516 §3.3: ALL bytes in a Data Block must have odd parity.
+         * 0x00 has even parity; 0x80 = parity(0x00) is the correct null byte.
+         * This matters for the padding bytes at the end of the last (non-full)
+         * packet, which are not overwritten by the NAPLPS memcpy below. */
+        memset(data, 0x80, sizeof(data));
         int chunk, is_full;
 
         if (first) {
@@ -433,7 +443,9 @@ void demo_ascii(void)
 {
     while (1) {
         uint8_t data[NABTS_DATA_BLOCK_BYTES];
-        memset(data, 0x00, sizeof(data));
+        /* CEA-516 §3.3: pad with 0x80 (odd parity of zero), not 0x00.
+         * All 28 bytes are overwritten below, so this is defensive. */
+        memset(data, 0x80, sizeof(data));
 
         /* Data Group Header: 1 packet, final block = 28 bytes (full) */
         make_dg_header(data, page_gc, 0, 1, NABTS_DATA_BLOCK_BYTES);

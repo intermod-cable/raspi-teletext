@@ -88,7 +88,12 @@ void get_packet(uint8_t *dest)
         /* Queue empty: emit a filler packet using the shared null-channel CI. */
         uint8_t zero_data[NABTS_DATA_BLOCK_BYTES];
         uint8_t fill[NABTS_LINE_BYTES];
-        memset(zero_data, 0x00, sizeof(zero_data));
+        /*
+         * CEA-516 §3.3: every byte in a Data Block must have odd parity.
+         * 0x00 has zero 1-bits (even parity) and violates this requirement.
+         * 0x80 = parity(0x00): one 1-bit (odd parity) — the correct null byte.
+         */
+        memset(zero_data, 0x80, sizeof(zero_data));
         nabts_build_packet(fill, 0x000, null_ci_next(), 0, 1, zero_data);
         copy_packet(fill, dest);
     } else {

@@ -86,7 +86,7 @@ sudo ./teletext [-l level] [-m even-mask] [-o odd-mask] [-d mode] [-]
 
 | Flag | Argument | Description |
 |------|----------|-------------|
-| `-l` | 0–100 | White level (brightness of logic-1 bits). Default: 100 |
+| `-l` | 0–100 | White level (brightness of logic-1 bits). Default: 71 (≈ 70 IRE, centre of CEA-516 §1.6 range) |
 | `-m` | 16-bit hex | Line mask for even fields. Bit 0 = first VBI row, bit 11 = last. 1 = skip, 0 = transmit |
 | `-o` | 16-bit hex | Line mask for odd fields. If only `-m` is given, the same mask applies to both fields |
 | `-d` | `ascii` or `graphics` | Demo mode. Default: `graphics` |

@@ -57,10 +57,14 @@ static int guarded_push_page_len(int raw_len)
     return raw_len;
 }
 
-/* number of packets needed for a given NAPLPS length */
+/* number of packets needed for a given NAPLPS length.
+ *
+ * Must mirror push_page() exactly: the first Data Block holds the 8-byte
+ * DG header AND the 5-byte Record Header, leaving only 15 bytes for NAPLPS
+ * (not 20 — the Record Header was previously forgotten here). */
 static int packets_for(int nl_len)
 {
-    int first_payload = NABTS_DATA_BLOCK_BYTES - 8;  /* 20 */
+    int first_payload = NABTS_DATA_BLOCK_BYTES - 8 - NABTS_REC_HDR_BYTES;  /* 15 */
     if (nl_len <= first_payload) return 1;
     int remaining = nl_len - first_payload;
     int extra = (remaining + NABTS_DATA_BLOCK_BYTES - 1) / NABTS_DATA_BLOCK_BYTES;
@@ -147,30 +151,36 @@ int main(void)
     /* ── Bug 3: FSS size guard ───────────────────────────────────────── */
     printf("\n[Bug 3] push_page() FSS Data Group size guard (§8.4.2.5)\n");
     {
-        /* (a) constant correctness */
-        int expected_max = (NABTS_DATA_BLOCK_BYTES - 8)
+        /* (a) constant correctness.
+         *
+         * The first Data Block carries the 8-byte DG header AND the 5-byte
+         * Record Header, so first-packet NAPLPS capacity = 28 - 8 - 5 = 15.
+         * Packets 2-68 carry 28 bytes each (67 × 28 = 1876).
+         * Maximum = 15 + 1876 = 1891.  (Previously 1896 — off by 5 because
+         * NABTS_REC_HDR_BYTES was omitted from the first-packet calculation.) */
+        int expected_max = (NABTS_DATA_BLOCK_BYTES - 8 - NABTS_REC_HDR_BYTES)
                          + (NABTS_FSS_MAX_PACKETS - 1) * NABTS_DATA_BLOCK_BYTES;
         CHECK("B3-1  NABTS_FSS_MAX_PACKETS == 68",    NABTS_FSS_MAX_PACKETS == 68);
-        CHECK("B3-2  NABTS_FSS_MAX_NAPLPS == 1896",   NABTS_FSS_MAX_NAPLPS  == 1896);
+        CHECK("B3-2  NABTS_FSS_MAX_NAPLPS == 1891",   NABTS_FSS_MAX_NAPLPS  == 1891);
         CHECK("B3-3  NABTS_FSS_MAX_NAPLPS formula correct",
               NABTS_FSS_MAX_NAPLPS == expected_max);
 
         /* (b) page at exactly the limit → not truncated, S == 67 */
-        int len_at_limit   = NABTS_FSS_MAX_NAPLPS;          /* 1896 */
+        int len_at_limit   = NABTS_FSS_MAX_NAPLPS;          /* 1891 */
         int guarded        = guarded_push_page_len(len_at_limit);
         int pkts_at_limit  = packets_for(guarded);
         int S_at_limit     = pkts_at_limit - 1;
-        CHECK("B3-4  1896-byte page is not truncated",      guarded == 1896);
-        CHECK("B3-5  1896-byte page → 68 packets",          pkts_at_limit == 68);
+        CHECK("B3-4  1891-byte page is not truncated",      guarded == 1891);
+        CHECK("B3-5  1891-byte page → 68 packets",          pkts_at_limit == 68);
         CHECK("B3-6  S == 67 at limit (max FSS)",            S_at_limit == 67);
 
-        /* (c) one byte over → truncated to 1896 */
+        /* (c) one byte over → truncated to 1891 */
         int over           = guarded_push_page_len(NABTS_FSS_MAX_NAPLPS + 1);
-        CHECK("B3-7  1897-byte page is truncated to 1896",  over == 1896);
+        CHECK("B3-7  1892-byte page is truncated to 1891",  over == 1891);
 
-        /* (d) well over limit → still capped at 1896 */
+        /* (d) well over limit → still capped at 1891 */
         int big            = guarded_push_page_len(9999);
-        CHECK("B3-8  9999-byte page is capped at 1896",     big == 1896);
+        CHECK("B3-8  9999-byte page is capped at 1891",     big == 1891);
 
         /* (e) small page → unchanged */
         int small          = guarded_push_page_len(100);
@@ -180,13 +190,12 @@ int main(void)
          *     max expressible S = 0xFF = 255 > 67 → no overflow) */
         CHECK("B3-10 S=67 fits in 8-bit S1:S2 field",      S_at_limit <= 0xFF);
 
-        /* (g) FSS limit < 1-suffix limit (§8.4.2.5 note: 1-byte suffix gives
-         *     max 1836 bytes; without suffix max 1904.  Our cap 1896 is in
-         *     range for no-suffix case and correctly more conservative than
-         *     the no-suffix theoretical maximum of 1904 bytes). */
-        int no_suffix_theoretical = 68 * NABTS_DATA_BLOCK_BYTES - 8; /* 1896 */
-        CHECK("B3-11 NABTS_FSS_MAX_NAPLPS matches no-suffix theoretical max",
-              NABTS_FSS_MAX_NAPLPS == no_suffix_theoretical);
+        /* (g) Our cap (1891) is strictly below the raw no-suffix capacity
+         *     of 68 × 28 − 8 = 1896, because the Record Header (5 bytes)
+         *     occupies part of the first Data Block.  1891 < 1896. */
+        int no_suffix_raw = 68 * NABTS_DATA_BLOCK_BYTES - 8; /* 1896 */
+        CHECK("B3-11 NABTS_FSS_MAX_NAPLPS < raw no-suffix capacity",
+              NABTS_FSS_MAX_NAPLPS < no_suffix_raw);
     }
 
     /* ── summary ─────────────────────────────────────────────────────── */

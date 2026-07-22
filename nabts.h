@@ -296,13 +296,18 @@ static const uint8_t nabts_px_width[NABTS_TOTAL_BITS] = {
  * In the FSS service the maximum S value (S1,S2 decoded) is 67, meaning at
  * most 68 Data Packets per Data Group.  With a 28-byte Data Block and no
  * suffix the maximum NAPLPS payload is:
- *   first packet:  28 - 8 (DG header) = 20 bytes
- *   packets 2-68:  67 × 28            = 1876 bytes
- *   total:                              1896 bytes
+ *   first packet:  28 - 8 (DG header) - 5 (Record Header) = 15 bytes
+ *   packets 2-68:  67 × 28                                 = 1876 bytes
+ *   total:                                                    1891 bytes
+ *
+ * Note: the Record Header (NABTS_REC_HDR_BYTES = 5) always occupies part of
+ * the first Data Block alongside the DG header, leaving only 15 bytes for
+ * NAPLPS in packet 1.  The previous value of 1896 was off by 5 and could
+ * allow push_page() to generate 69 packets (exceeding the FSS limit of 68).
  */
 #define NABTS_FSS_MAX_PACKETS  68
 #define NABTS_FSS_MAX_NAPLPS \
-    ((NABTS_DATA_BLOCK_BYTES - 8) + \
-     (NABTS_FSS_MAX_PACKETS - 1) * NABTS_DATA_BLOCK_BYTES)   /* 1896 */
+    ((NABTS_DATA_BLOCK_BYTES - 8 - NABTS_REC_HDR_BYTES) + \
+     (NABTS_FSS_MAX_PACKETS - 1) * NABTS_DATA_BLOCK_BYTES)   /* 1891 */
 
 #endif /* NABTS_H */
