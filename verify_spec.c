@@ -486,13 +486,19 @@ static void test_dg_header(void)
     }
     CHECK("N12 all 8 DG header bytes have odd parity", ok);
 
-    /* N13: layout leaves 20 NAPLPS bytes after 8-byte header */
-    CHECK("N13 DG header (8) leaves 20 bytes for NAPLPS in first packet",
-          (NABTS_DATA_BLOCK_BYTES - 8) == 20);
+    /* N13: every Synchronizing Packet in this codebase carries the DG
+     * header (8) AND the Record Header (5), leaving 15 bytes for NAPLPS
+     * in the first packet -- not 20.  (28-8=20 is true in isolation but
+     * describes a layout nothing here transmits; omitting the Record
+     * Header from this figure is exactly the error that made
+     * NABTS_FSS_MAX_NAPLPS wrong before it was fixed.) */
+    CHECK("N13 DG hdr(8)+Rec hdr(5) leaves 15 bytes for NAPLPS in pkt 1",
+          (NABTS_DATA_BLOCK_BYTES - 8 - NABTS_REC_HDR_BYTES) == 15);
 
-    /* N14: ASCII demo fits exactly (8 + 20 = 28 = full) */
-    CHECK("N14 ASCII: header(8) + payload(20) == 28 == full packet",
-          (8 + 20) == NABTS_DATA_BLOCK_BYTES);
+    /* N14: ASCII demo fits exactly (8 + 5 + 15 = 28 = full), matching
+     * demo_ascii()'s actual data[] layout. */
+    CHECK("N14 ASCII: DGhdr(8)+RecHdr(5)+payload(15) == 28 == full packet",
+          (8 + NABTS_REC_HDR_BYTES + 15) == NABTS_DATA_BLOCK_BYTES);
 
     /* N15: line_mask applied before loop produces correct skip pattern */
     uint16_t mask = 0xAAAA;

@@ -61,7 +61,7 @@ static int guarded_push_page_len(int raw_len)
  *
  * Must mirror push_page() exactly: the first Data Block holds the 8-byte
  * DG header AND the 5-byte Record Header, leaving only 15 bytes for NAPLPS
- * (not 20 — the Record Header was previously forgotten here). */
+ * (not 20 -- the Record Header was previously omitted here). */
 static int packets_for(int nl_len)
 {
     int first_payload = NABTS_DATA_BLOCK_BYTES - 8 - NABTS_REC_HDR_BYTES;  /* 15 */
@@ -156,8 +156,8 @@ int main(void)
          * The first Data Block carries the 8-byte DG header AND the 5-byte
          * Record Header, so first-packet NAPLPS capacity = 28 - 8 - 5 = 15.
          * Packets 2-68 carry 28 bytes each (67 × 28 = 1876).
-         * Maximum = 15 + 1876 = 1891.  (Previously 1896 — off by 5 because
-         * NABTS_REC_HDR_BYTES was omitted from the first-packet calculation.) */
+         * Maximum = 15 + 1876 = 1891.  (Previously 1896 -- off by 5 because
+         * NABTS_REC_HDR_BYTES was omitted from the first-packet calc.) */
         int expected_max = (NABTS_DATA_BLOCK_BYTES - 8 - NABTS_REC_HDR_BYTES)
                          + (NABTS_FSS_MAX_PACKETS - 1) * NABTS_DATA_BLOCK_BYTES;
         CHECK("B3-1  NABTS_FSS_MAX_PACKETS == 68",    NABTS_FSS_MAX_PACKETS == 68);
@@ -190,9 +190,9 @@ int main(void)
          *     max expressible S = 0xFF = 255 > 67 → no overflow) */
         CHECK("B3-10 S=67 fits in 8-bit S1:S2 field",      S_at_limit <= 0xFF);
 
-        /* (g) Our cap (1891) is strictly below the raw no-suffix capacity
-         *     of 68 × 28 − 8 = 1896, because the Record Header (5 bytes)
-         *     occupies part of the first Data Block.  1891 < 1896. */
+        /* (g) Our cap (1891) is strictly below the raw no-suffix capacity of
+         *     68 × 28 − 8 = 1896, because the Record Header (5 bytes) also
+         *     occupies part of the first Data Block: 1891 < 1896. */
         int no_suffix_raw = 68 * NABTS_DATA_BLOCK_BYTES - 8; /* 1896 */
         CHECK("B3-11 NABTS_FSS_MAX_NAPLPS < raw no-suffix capacity",
               NABTS_FSS_MAX_NAPLPS < no_suffix_raw);

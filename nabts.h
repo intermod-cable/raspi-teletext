@@ -96,6 +96,12 @@
 #define NABTS_DATA_BLOCK_BYTES 28  /* Data Block, no-suffix case              */
 #define NABTS_PACKET_BYTES    (NABTS_PREFIX_BYTES + NABTS_DATA_BLOCK_BYTES) /* 33 */
 
+/* Record Header (§5.2.1): RT + RD + A1 + A2 + A3, all Hamming-encoded.
+ * This always occupies the start of a Synchronizing Packet's Data Group
+ * Data (immediately after the 8-byte Data Group Header), so it affects
+ * how much of the first Data Block is available for NAPLPS payload. */
+#define NABTS_REC_HDR_BYTES    5
+
 /* Total on-wire bytes per Data Line */
 #define NABTS_LINE_BYTES      (NABTS_PREAMBLE_BYTES + NABTS_PACKET_BYTES) /* 36 */
 
@@ -293,17 +299,29 @@ static const uint8_t nabts_px_width[NABTS_TOTAL_BITS] = {
 
 /* ── FSS Data Group size limits (CEA-516 §8.4.2.5) ─────────────────────────
  *
- * In the FSS service the maximum S value (S1,S2 decoded) is 67, meaning at
- * most 68 Data Packets per Data Group.  With a 28-byte Data Block and no
- * suffix the maximum NAPLPS payload is:
+ * Spec text (§8.4.2.5): "In the FSS service, the maximum number indicated
+ * by S1, S2 shall be 67. This means that the maximum size of a Data Group
+ * in the FSS service is 68 Data Packets. [...] Note that if no Suffix is
+ * used then the maximum size of the Data Group is 1904 bytes."
+ *
+ * That 1904-byte figure is the TOTAL Data Group size (68 packets × 28
+ * bytes/packet), which includes the 8-byte Data Group Header embedded in
+ * packet 1 (§4.2.1) and the 5-byte Record Header that immediately follows
+ * it (§5.2.1) before any NAPLPS/Record Data begins. So the maximum NAPLPS
+ * payload this encoder may place in nl_page is:
+ *
+ *   1904 (max Data Group) - 8 (DG header) - 5 (Record Header) = 1891 bytes
+ *
+ * Equivalently, packet-by-packet:
  *   first packet:  28 - 8 (DG header) - 5 (Record Header) = 15 bytes
  *   packets 2-68:  67 × 28                                 = 1876 bytes
  *   total:                                                    1891 bytes
  *
- * Note: the Record Header (NABTS_REC_HDR_BYTES = 5) always occupies part of
- * the first Data Block alongside the DG header, leaving only 15 bytes for
- * NAPLPS in packet 1.  The previous value of 1896 was off by 5 and could
- * allow push_page() to generate 69 packets (exceeding the FSS limit of 68).
+ * The Record Header always occupies part of the first Data Block alongside
+ * the DG header, leaving only 15 bytes for NAPLPS in packet 1 -- not 20.
+ * An earlier version of this macro used 1896 (28-8, omitting the Record
+ * Header) and could let push_page() emit 69 packets, exceeding the FSS
+ * limit of 68 packets (S > 67) that real decoders enforce.
  */
 #define NABTS_FSS_MAX_PACKETS  68
 #define NABTS_FSS_MAX_NAPLPS \

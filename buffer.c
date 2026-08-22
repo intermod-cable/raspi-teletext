@@ -89,9 +89,13 @@ void get_packet(uint8_t *dest)
         uint8_t zero_data[NABTS_DATA_BLOCK_BYTES];
         uint8_t fill[NABTS_LINE_BYTES];
         /*
-         * CEA-516 §3.3: every byte in a Data Block must have odd parity.
-         * 0x00 has zero 1-bits (even parity) and violates this requirement.
-         * 0x80 = parity(0x00): one 1-bit (odd parity) — the correct null byte.
+         * CEA-516 §3.3: "All bytes within Data Blocks belonging to Data
+         * Group Type zero [...] shall be transmitted with odd parity."
+         * Also §8.3.4 (FSS): "The extra bytes shall also have odd parity."
+         * 0x00 has zero 1-bits (even parity) and violates this. 0x80 is
+         * parity(0x00) -- one 1-bit (odd parity) -- the correct null byte.
+         * Confirmed against decode-orc's nabts_test_builders.h make_packet(),
+         * which pads unused data-block bytes with parity(0x00) = 0x80.
          */
         memset(zero_data, 0x80, sizeof(zero_data));
         nabts_build_packet(fill, 0x000, null_ci_next(), 0, 1, zero_data);

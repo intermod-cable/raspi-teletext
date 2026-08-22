@@ -40,6 +40,17 @@
  *  Continuity Index (CI, §3.2.4):
  *    Increments by 1 (mod 16) for each packet on a given channel.
  *    Managed per-channel with nabts_ci_t / nabts_ci_next().
+ *    Kept continuous across Data Groups (not reset per page), matching the
+ *    recommendation in §8.3.2.4: "It is recommended that the continuity
+ *    Index be continuous across Data Groups."
+ *
+ *  Packet-rate pacing: §8.3.2.3 restricts full-field teletext to groups of
+ *  <= 32 Data Packets / <= 12 Synchronizing Packets separated by >= 230
+ *  scan lines, but that restriction is explicit about VBI: "In VBI
+ *  teletext, interspacing of Data Packets is not required. All Data
+ *  Packets in the VBI may have the same Packet Address." This encoder only
+ *  transmits on VBI lines 10-21 (never full-field/active-video lines), so
+ *  no packet-group pacing logic is required here.
  *
  * ── NAPLPS encoding ──────────────────────────────────────────────────────
  *
@@ -63,8 +74,8 @@
  *    clear(1) + set_bg(3) + 5 bars(85) + title(21) + box(17) + counter(19)
  *    = 146 bytes
  *  (The 5-byte Record Header is added by push_page() inside the Data Block,
- *   not stored in nl_page.  The old comment mistakenly counted it here,
- *   giving 151 instead of 146.)
+ *   not stored in nl_page.  It was previously double-counted here as part
+ *   of the 151-byte total.)
  *
  *  Packet 1 (sync): 8-byte DG header + 5-byte Rec Hdr + 15 NAPLPS = 28, full
  *  Packets 2-5:     28 NAPLPS bytes each = 112 bytes
@@ -147,7 +158,7 @@ static void nl_text(const char *s) { while (*s) nl_byte((uint8_t)*s++); }
 #define PAGE_ADDR_A2  0x6u     /* middle nibble                    */
 #define PAGE_ADDR_A3  0x4u     /* least-significant nibble         */
 
-#define NABTS_REC_HDR_BYTES  5   /* RT + RD + A1 + A2 + A3          */
+/* NABTS_REC_HDR_BYTES is defined in nabts.h (CEA-516 §5.2.1 constant) */
 
 /* ── Per-channel CI trackers ───────────────────────────────────────────── */
 
@@ -165,7 +176,7 @@ static void push_null(void)
 {
     uint8_t line[NABTS_LINE_BYTES];
     uint8_t data[NABTS_DATA_BLOCK_BYTES];
-    /* CEA-516 §3.3: use 0x80 (odd parity of zero) not 0x00 (even parity). */
+    /* CEA-516 §3.3: use 0x80 (odd parity of zero), not 0x00 (even parity). */
     memset(data, 0x80, sizeof(data));
     nabts_build_packet(line, 0x000, null_ci_next(), 0, 1, data);
     push_packet(line);
@@ -248,7 +259,8 @@ static void push_page(void)
 {
     /*
      * CEA-516 §8.4.2.5: FSS Data Groups may not exceed 68 packets (S ≤ 67).
-     * With 28-byte Data Blocks this limits NAPLPS payload to 1896 bytes.
+     * With 28-byte Data Blocks and the 5-byte Record Header always present
+     * in packet 1, this limits NAPLPS payload to 1891 bytes.
      * Truncate silently and warn on stderr so callers can detect the issue.
      */
     if (nl_len > NABTS_FSS_MAX_NAPLPS) {
@@ -283,10 +295,17 @@ static void push_page(void)
 
     while (naplps_offset < nl_len || first) {
         uint8_t data[NABTS_DATA_BLOCK_BYTES];
-        /* CEA-516 §3.3: ALL bytes in a Data Block must have odd parity.
-         * 0x00 has even parity; 0x80 = parity(0x00) is the correct null byte.
-         * This matters for the padding bytes at the end of the last (non-full)
-         * packet, which are not overwritten by the NAPLPS memcpy below. */
+        /*
+         * CEA-516 §3.3: ALL bytes in a Data Block must have odd parity.
+         * §8.3.4 (FSS) is explicit about exactly this case: "If [...] the
+         * Data Packet is not completely full of useful data, then the
+         * error correction-and-detection schemes used by the Suffix shall
+         * also apply to the extra bytes. The extra bytes shall also have
+         * odd parity." 0x00 has even parity; 0x80 = parity(0x00) is the
+         * correct null byte. This matters here: the padding bytes at the
+         * end of the last (non-full) packet are not overwritten by the
+         * memcpy below and are transmitted as-is.
+         */
         memset(data, 0x80, sizeof(data));
         int chunk, is_full;
 
